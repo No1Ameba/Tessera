@@ -592,41 +592,13 @@ static void handle_session_attach(ipc_server_t *srv, int client_fd,
     memcpy(buf + sizeof(hdr) + sizeof(resp), panes, arr_sz);
     write(client_fd, buf, sizeof(hdr) + total);
 
-    /* 각 pane의 링 버퍼를 PTY_OUTPUT으로 재전송 (요청 클라이언트에만) */
-    for (int i = 0; i < pane_count; i++) {
-        ipc_pane_slot_t *ps = NULL;
-        for (int j = 0; j < IPC_MAX_PANES; j++) {
-            if (srv->panes[j].pty_fd >= 0 &&
-                srv->panes[j].pane_id == panes[i].pane_id) {
-                ps = &srv->panes[j];
-                break;
-            }
-        }
-        if (!ps || ps->ring_count == 0) continue;
-
-        /* 링 버퍼 읽기 시작 위치 */
-        size_t start = (ps->ring_head + PANE_RING_SIZE - ps->ring_count) % PANE_RING_SIZE;
-        size_t remaining = ps->ring_count;
-
-        while (remaining > 0) {
-            size_t chunk = remaining > IPC_PTY_CHUNK_MAX ? IPC_PTY_CHUNK_MAX : remaining;
-            uint8_t tmp[IPC_PTY_CHUNK_MAX];
-            for (size_t k = 0; k < chunk; k++)
-                tmp[k] = ps->ring[(start + k) % PANE_RING_SIZE];
-
-            ipc_payload_pty_data_t dh;
-            dh.pane_id  = ps->pane_id;
-            dh.data_len = (uint16_t)chunk;
-            ipc_msg_header_t mh = IPC_HEADER_INIT(IPC_MSG_PTY_OUTPUT,
-                (uint16_t)(sizeof(dh) + chunk));
-            write(client_fd, &mh, sizeof(mh));
-            write(client_fd, &dh, sizeof(dh));
-            write(client_fd, tmp, chunk);
-
-            start = (start + chunk) % PANE_RING_SIZE;
-            remaining -= chunk;
-        }
-    }
+    /* PTY 링 버퍼 replay는 여기서 하지 않는다.
+     * 이유: recv_until()이 ATTACH_R을 기다리는 동안 PTY_OUTPUT이 도착하면
+     * 클라이언트의 pane_slot이 아직 생성 전이라 데이터가 드롭된다.
+     *
+     * 대신 클라이언트가 pane_slot 생성 후 PANE_RESIZE를 보내면
+     * SIGWINCH로 원격 앱이 화면을 다시 그린다. */
+    (void)0; /* 링 버퍼 인프라는 유지 — 향후 별도 replay 메시지로 활용 */
 }
 
 static void dispatch_message(ipc_server_t *srv, int client_fd,
