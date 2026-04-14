@@ -1225,27 +1225,9 @@ int main(int argc, char *argv[])
         fprintf(stderr, "[termemu] attached to session '%s' (%d panes)\n",
                 attach_name, pane_count);
     } else {
-        /* 기존 세션 목록 확인 */
+        /* 세션 목록 조회 + 선택 다이얼로그 항상 표시 (원격도 동일) */
         ipc_client_session_list(g_client, g_picker_sessions, 64, &g_picker_count);
-
-        if (g_picker_count == 0) {
-            /* 세션 없음 → 바로 "default" 생성 */
-            ipc_client_session_create(g_client, "default", &g_session_id);
-            ipc_client_window_create(g_client, g_session_id, "1", &g_window_id);
-            uint32_t first_pane = 0;
-            ipc_client_pane_create(g_client, g_session_id, g_window_id,
-                                    (uint16_t)cols, (uint16_t)rows, &first_pane);
-            pane_slot_t *first_slot = pane_slot_alloc(first_pane, cols, rows);
-            if (first_slot) {
-                screen_apply_theme(&first_slot->screen, g_theme);
-                screen_set_clipboard_cb(&first_slot->screen, on_clipboard_set, NULL);
-            }
-            g_active_pane = first_pane;
-            g_layout = layout_create_leaf(first_pane, 0, 0, g_win_w, g_win_h);
-        } else {
-            /* 세션 있음 → UI로 선택 */
-            g_show_session_picker = 1;
-        }
+        g_show_session_picker = 1;
     }
 
     /* ── 설정 핫 리로드 감시 ────────────────────────────────────────────── */
@@ -1377,13 +1359,26 @@ int main(int argc, char *argv[])
                         float dw = 420, dh = 350;
                         float dx = ((float)g_win_w - dw) * 0.5f;
                         float dy = ((float)g_win_h - dh) * 0.5f;
-                        if (nk_begin(g_nk_ctx, "Select Session",
+                        const char *title = remote_target
+                            ? "Select Session (Remote)" : "Select Session";
+                        if (nk_begin(g_nk_ctx, title,
                                      nk_rect(dx, dy, dw, dh),
                                      NK_WINDOW_BORDER | NK_WINDOW_TITLE |
                                      NK_WINDOW_NO_SCROLLBAR))
                         {
+                            if (remote_target) {
+                                nk_layout_row_dynamic(g_nk_ctx, 20, 1);
+                                char info[128];
+                                snprintf(info, sizeof info, "Connected to: %s", remote_target);
+                                nk_label_colored(g_nk_ctx, info, NK_TEXT_LEFT,
+                                                 nk_rgb(120, 200, 255));
+                            }
+
                             nk_layout_row_dynamic(g_nk_ctx, 25, 1);
-                            nk_label(g_nk_ctx, "Existing sessions:", NK_TEXT_LEFT);
+                            if (g_picker_count == 0)
+                                nk_label(g_nk_ctx, "No existing sessions.", NK_TEXT_LEFT);
+                            else
+                                nk_label(g_nk_ctx, "Existing sessions:", NK_TEXT_LEFT);
 
                             for (int i = 0; i < g_picker_count; i++) {
                                 nk_layout_row_dynamic(g_nk_ctx, 28, 1);
