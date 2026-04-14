@@ -1230,10 +1230,10 @@ int main(int argc, char *argv[])
 
                     /* ── 우클릭 컨텍스트 메뉴 (복사/붙여넣기 + 분할 + 설정) ── */
                     if (g_show_context_menu) {
-                        if (nk_begin(g_nk_ctx, "ctx_menu",
+                        int ctx_open = nk_begin(g_nk_ctx, "ctx_menu",
                                      nk_rect(g_context_menu_x, g_context_menu_y, 180, 250),
-                                     NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR))
-                        {
+                                     NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR);
+                        if (ctx_open) {
                             nk_layout_row_dynamic(g_nk_ctx, 28, 1);
                             if (nk_button_label(g_nk_ctx, "Copy")) {
                                 /* 현재 선택 영역을 복사 */
@@ -1283,15 +1283,17 @@ int main(int argc, char *argv[])
                                 do_close_pane();
                                 g_show_context_menu = 0;
                             }
-                        }
-                        /* 메뉴 밖 클릭 시 닫기 — 마우스 PRESS 엣지만 감지 */
-                        {
-                            static int prev_left = 0;
-                            int now_left = glfwGetMouseButton(g_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-                            int edge = (!prev_left && now_left);
-                            prev_left = now_left;
-                            if (edge && !nk_window_is_hovered(g_nk_ctx))
-                                g_show_context_menu = 0;
+                            /* 메뉴 밖 클릭 시 닫기 — nk_begin 성공 블록 내에서만 hovered 체크 */
+                            {
+                                static int prev_left = 0;
+                                int now_left = glfwGetMouseButton(g_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+                                int edge = (!prev_left && now_left);
+                                prev_left = now_left;
+                                if (edge && !nk_window_is_hovered(g_nk_ctx))
+                                    g_show_context_menu = 0;
+                            }
+                        } else {
+                            g_show_context_menu = 0;  /* 윈도우 숨겨짐 */
                         }
                         nk_end(g_nk_ctx);
                     }
