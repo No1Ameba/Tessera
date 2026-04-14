@@ -978,6 +978,11 @@ int main(int argc, char *argv[])
         int sess_count = 0;
         ipc_client_session_list(g_client, sessions, 64, &sess_count);
 
+        fprintf(stderr, "[termemu] %d session(s) found\n", sess_count);
+        for (int i = 0; i < sess_count; i++)
+            fprintf(stderr, "  [%d] id=%u name='%s'\n",
+                    i, sessions[i].session_id, sessions[i].name);
+
         uint32_t target_sid = 0;
         for (int i = 0; i < sess_count; i++) {
             if (strcmp(sessions[i].name, attach_name) == 0) {
@@ -986,15 +991,17 @@ int main(int argc, char *argv[])
             }
         }
         if (!target_sid) {
-            fprintf(stderr, "Session '%s' not found\n", attach_name);
+            fprintf(stderr, "Session '%s' not found. Is the first termemu still running?\n",
+                    attach_name);
             return 1;
         }
 
+        fprintf(stderr, "[termemu] attaching to session_id=%u...\n", target_sid);
         ipc_attach_pane_info_t panes[64];
         int pane_count = 0;
         if (ipc_client_session_attach(g_client, target_sid,
                                        panes, 64, &pane_count) != 0) {
-            fprintf(stderr, "Failed to attach to session\n");
+            fprintf(stderr, "Failed to attach to session (daemon may need restart: pkill termemu-daemon)\n");
             return 1;
         }
 
