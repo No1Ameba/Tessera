@@ -47,7 +47,8 @@
 
 /* ── Pane registry ───────────────────────────────────────────────────────── */
 
-#define MAX_PANES 16
+#define MAX_PANES   16
+#define MENU_BAR_H  26  /* 상단 메뉴 바 높이 (px) — 터미널 영역 밖 */
 
 typedef struct {
     uint32_t  pane_id;
@@ -784,7 +785,7 @@ static void framebuffer_size_callback(GLFWwindow *win, int width, int height)
     g_win_w = width;
     g_win_h = height;
     gl_renderer_resize(g_renderer, g_win_w, g_win_h);
-    layout_resize_root(g_layout, 0, 0, g_win_w, g_win_h);
+    layout_resize_root(g_layout, 0, MENU_BAR_H, g_win_w, g_win_h - MENU_BAR_H);
     int fw = font_cell_width(g_font);
     int fh = font_cell_height(g_font);
     resize_ctx_t rctx = { g_client, g_session_id, g_window_id, fw, fh };
@@ -1028,7 +1029,7 @@ int main(int argc, char *argv[])
             if (i == 0) {
                 g_active_pane = panes[i].pane_id;
                 g_layout = layout_create_leaf(panes[i].pane_id,
-                                               0, 0, g_win_w, g_win_h);
+                                               0, MENU_BAR_H, g_win_w, g_win_h - MENU_BAR_H);
             } else if (g_layout) {
                 layout_node_t *cur = layout_find_pane(g_layout, g_active_pane);
                 if (cur) {
@@ -1042,7 +1043,7 @@ int main(int argc, char *argv[])
 
         /* SIGWINCH 트릭: attach 후 resize를 보내 원격 앱이 화면을 다시 그리게 함 */
         if (g_layout) {
-            layout_resize_root(g_layout, 0, 0, g_win_w, g_win_h);
+            layout_resize_root(g_layout, 0, MENU_BAR_H, g_win_w, g_win_h - MENU_BAR_H);
             resize_ctx_t rctx = { g_client, g_session_id, g_window_id, fw, fh };
             layout_each_leaf(g_layout, resize_leaf_cb, &rctx);
         }
@@ -1068,7 +1069,8 @@ int main(int argc, char *argv[])
             screen_set_clipboard_cb(&first_slot->screen, on_clipboard_set, NULL);
         }
         g_active_pane = first_pane;
-        g_layout = layout_create_leaf(first_pane, 0, 0, g_win_w, g_win_h);
+        g_layout = layout_create_leaf(first_pane, 0, MENU_BAR_H,
+                                       g_win_w, g_win_h - MENU_BAR_H);
     }
 
     /* ── 설정 핫 리로드 감시 ────────────────────────────────────────────── */
@@ -1125,40 +1127,63 @@ int main(int argc, char *argv[])
                 if (g_nk_ctx) {
                     nk_impl_new_frame();
 
-                    /* ── 우상단 메뉴 버튼 (항상 표시) ── */
-                    if (!g_show_context_menu && !g_show_settings) {
-                        float btn_w = 30, btn_h = 24;
-                        float btn_x = (float)g_win_w - btn_w - 4;
-                        float btn_y = 4;
-                        if (nk_begin(g_nk_ctx, "menu_btn",
-                                     nk_rect(btn_x, btn_y, btn_w, btn_h),
-                                     NK_WINDOW_NO_SCROLLBAR | NK_WINDOW_NO_INPUT))
-                        {
+                    /* ── 상단 메뉴 바 (터미널 영역 밖) ── */
+                    if (nk_begin(g_nk_ctx, "menubar",
+                                 nk_rect(0, 0, (float)g_win_w, MENU_BAR_H),
+                                 NK_WINDOW_NO_SCROLLBAR))
+                    {
+                        nk_layout_row_static(g_nk_ctx, MENU_BAR_H - 4, 70, 5);
+                        if (nk_button_label(g_nk_ctx, "Settings")) {
+                            g_show_settings = !g_show_settings;
+                            if (g_show_settings)
+                                nk_impl_show_window("Settings", 1);
                         }
-                        nk_end(g_nk_ctx);
-
-                        /* 버튼 위에 직접 그리기 — 작은 "≡" 버튼 */
-                        if (nk_begin(g_nk_ctx, "menu_trigger",
-                                     nk_rect(btn_x, btn_y, btn_w, btn_h),
-                                     NK_WINDOW_NO_SCROLLBAR))
-                        {
-                            nk_layout_row_static(g_nk_ctx, btn_h - 4, (int)btn_w - 4, 1);
-                            if (nk_button_label(g_nk_ctx, "=")) {
-                                g_show_context_menu = 1;
-                                g_context_menu_x = btn_x;
-                                g_context_menu_y = btn_y + btn_h;
-                            }
-                        }
-                        nk_end(g_nk_ctx);
+                        if (nk_button_label(g_nk_ctx, "Split V"))
+                            do_split(LAYOUT_SPLIT_H);
+                        if (nk_button_label(g_nk_ctx, "Split H"))
+                            do_split(LAYOUT_SPLIT_V);
+                        if (nk_button_label(g_nk_ctx, "Close"))
+                            do_close_pane();
                     }
+                    nk_end(g_nk_ctx);
 
-                    /* ── 컨텍스트 메뉴 ── */
+                    /* ── 우클릭 컨텍스트 메뉴 (복사/붙여넣기 + 분할) ── */
                     if (g_show_context_menu) {
                         if (nk_begin(g_nk_ctx, "ctx_menu",
-                                     nk_rect(g_context_menu_x, g_context_menu_y, 170, 140),
+                                     nk_rect(g_context_menu_x, g_context_menu_y, 180, 195),
                                      NK_WINDOW_BORDER | NK_WINDOW_NO_SCROLLBAR))
                         {
                             nk_layout_row_dynamic(g_nk_ctx, 28, 1);
+                            if (nk_button_label(g_nk_ctx, "Copy")) {
+                                /* 현재 선택 영역을 복사 */
+                                if (g_has_selection) {
+                                    pane_slot_t *ss = pane_slot_find(g_sel_pane);
+                                    if (ss) {
+                                        char *text = selection_to_text(&ss->screen,
+                                            g_sel_sc, g_sel_sr, g_sel_ec, g_sel_er);
+                                        if (text) {
+                                            glfwSetClipboardString(g_window, text);
+                                            free(text);
+                                        }
+                                    }
+                                }
+                                g_show_context_menu = 0;
+                            }
+                            if (nk_button_label(g_nk_ctx, "Paste")) {
+                                const char *clip = glfwGetClipboardString(g_window);
+                                pane_slot_t *ps = pane_slot_find(g_active_pane);
+                                if (clip && ps) {
+                                    if (screen_bracketed_paste(&ps->screen))
+                                        ipc_client_pty_input(g_client, g_active_pane,
+                                            (const uint8_t*)"\x1b[200~", 6);
+                                    ipc_client_pty_input(g_client, g_active_pane,
+                                        (const uint8_t*)clip, strlen(clip));
+                                    if (screen_bracketed_paste(&ps->screen))
+                                        ipc_client_pty_input(g_client, g_active_pane,
+                                            (const uint8_t*)"\x1b[201~", 6);
+                                }
+                                g_show_context_menu = 0;
+                            }
                             if (nk_button_label(g_nk_ctx, "Settings")) {
                                 g_show_settings = 1;
                                 g_show_context_menu = 0;
