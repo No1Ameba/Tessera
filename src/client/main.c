@@ -157,7 +157,6 @@ static void on_pty_output(uint32_t pane_id, const uint8_t *data, size_t len,
     pane_slot_t *s = pane_slot_find(pane_id);
     if (s) {
         screen_feed(&s->screen, data, len);
-        /* Synchronized Output: sync_output=1이면 렌더링 보류 */
         if (!screen_sync_output(&s->screen))
             g_dirty = 1;
     }
@@ -516,6 +515,14 @@ static void key_callback(GLFWwindow *win, int key, int scancode,
     g_key_consumed = 0;
 
     if (action == GLFW_RELEASE) return;
+
+    /* ESC → 설정창 닫기 */
+    if (g_show_settings && key == GLFW_KEY_ESCAPE) {
+        g_show_settings = 0;
+        g_key_consumed = 1;
+        g_dirty = 1;
+        return;
+    }
 
     /* 키 입력 시 선택 해제 */
     if (g_has_selection) {
