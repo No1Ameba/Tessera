@@ -378,6 +378,15 @@ void nk_impl_handle_cursor_pos(double x, double y)
     nk_gl.last_mouse_y = y;
 }
 
+void nk_impl_reset_input(void)
+{
+    nk_gl.mouse_btn[0] = nk_gl.mouse_btn[1] = nk_gl.mouse_btn[2] = -1;
+    nk_gl.scroll_x = nk_gl.scroll_y = 0.0f;
+    /* Nuklear 내부 입력 상태도 클리어 */
+    nk_input_begin(&nk_gl.ctx);
+    nk_input_end(&nk_gl.ctx);
+}
+
 void nk_impl_show_window(const char *name, int show)
 {
     enum nk_show_states state = show ? NK_SHOWN : NK_HIDDEN;

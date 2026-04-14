@@ -48,6 +48,12 @@ void nk_impl_handle_cursor_pos(double x, double y);
 void nk_impl_show_window(const char *name, int show);
 
 /*
+ * 마우스 입력 상태를 리셋한다.
+ * 오버레이 열기 시 이전 클릭 상태가 남아 드래그되는 버그 방지.
+ */
+void nk_impl_reset_input(void);
+
+/*
  * 자원 해제.
  */
 void nk_impl_shutdown(void);

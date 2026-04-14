@@ -49,7 +49,6 @@
 /* ── Pane registry ───────────────────────────────────────────────────────── */
 
 #define MAX_PANES   16
-#define MENU_BAR_H  26  /* 상단 메뉴 바 높이 (px) — 터미널 영역 밖 */
 
 typedef struct {
     uint32_t  pane_id;
@@ -547,8 +546,10 @@ static void key_callback(GLFWwindow *win, int key, int scancode,
 
         if (keybind_matches(kb->preferences, mod_flags, key)) {
             g_show_settings = !g_show_settings;
-            if (g_show_settings)
+            if (g_show_settings) {
                 nk_impl_show_window("Settings", 1);
+                nk_impl_reset_input();
+            }
             g_key_consumed = 1;
             g_dirty = 1;
             return;
@@ -786,7 +787,7 @@ static void framebuffer_size_callback(GLFWwindow *win, int width, int height)
     g_win_w = width;
     g_win_h = height;
     gl_renderer_resize(g_renderer, g_win_w, g_win_h);
-    layout_resize_root(g_layout, 0, MENU_BAR_H, g_win_w, g_win_h - MENU_BAR_H);
+    layout_resize_root(g_layout, 0, 0, g_win_w, g_win_h);
     int fw = font_cell_width(g_font);
     int fh = font_cell_height(g_font);
     resize_ctx_t rctx = { g_client, g_session_id, g_window_id, fw, fh };
@@ -1065,8 +1066,7 @@ int main(int argc, char *argv[])
 
                 if (total_panes == 0) {
                     g_active_pane = pid;
-                    g_layout = layout_create_leaf(pid, 0, MENU_BAR_H,
-                                                   g_win_w, g_win_h - MENU_BAR_H);
+                    g_layout = layout_create_leaf(pid, 0, 0, g_win_w, g_win_h);
                 } else if (g_layout) {
                     layout_node_t *cur = layout_find_pane(g_layout, g_active_pane);
                     if (cur) {
@@ -1081,7 +1081,7 @@ int main(int argc, char *argv[])
         }
 
         if (g_layout) {
-            layout_resize_root(g_layout, 0, MENU_BAR_H, g_win_w, g_win_h - MENU_BAR_H);
+            layout_resize_root(g_layout, 0, 0, g_win_w, g_win_h);
             resize_ctx_t rctx = { g_client, g_session_id, g_window_id, fw, fh };
             layout_each_leaf(g_layout, resize_leaf_cb, &rctx);
         }
@@ -1137,7 +1137,7 @@ int main(int argc, char *argv[])
             if (i == 0) {
                 g_active_pane = panes[i].pane_id;
                 g_layout = layout_create_leaf(panes[i].pane_id,
-                                               0, MENU_BAR_H, g_win_w, g_win_h - MENU_BAR_H);
+                                               0, 0, g_win_w, g_win_h);
             } else if (g_layout) {
                 layout_node_t *cur = layout_find_pane(g_layout, g_active_pane);
                 if (cur) {
@@ -1151,7 +1151,7 @@ int main(int argc, char *argv[])
 
         /* SIGWINCH 트릭: attach 후 resize를 보내 원격 앱이 화면을 다시 그리게 함 */
         if (g_layout) {
-            layout_resize_root(g_layout, 0, MENU_BAR_H, g_win_w, g_win_h - MENU_BAR_H);
+            layout_resize_root(g_layout, 0, 0, g_win_w, g_win_h);
             resize_ctx_t rctx = { g_client, g_session_id, g_window_id, fw, fh };
             layout_each_leaf(g_layout, resize_leaf_cb, &rctx);
         }
@@ -1177,8 +1177,7 @@ int main(int argc, char *argv[])
             screen_set_clipboard_cb(&first_slot->screen, on_clipboard_set, NULL);
         }
         g_active_pane = first_pane;
-        g_layout = layout_create_leaf(first_pane, 0, MENU_BAR_H,
-                                       g_win_w, g_win_h - MENU_BAR_H);
+        g_layout = layout_create_leaf(first_pane, 0, 0, g_win_w, g_win_h);
     }
 
     /* ── 설정 핫 리로드 감시 ────────────────────────────────────────────── */
@@ -1235,27 +1234,7 @@ int main(int argc, char *argv[])
                 if (g_nk_ctx) {
                     nk_impl_new_frame();
 
-                    /* ── 상단 메뉴 바 (터미널 영역 밖) ── */
-                    if (nk_begin(g_nk_ctx, "menubar",
-                                 nk_rect(0, 0, (float)g_win_w, MENU_BAR_H),
-                                 NK_WINDOW_NO_SCROLLBAR))
-                    {
-                        nk_layout_row_static(g_nk_ctx, MENU_BAR_H - 4, 70, 5);
-                        if (nk_button_label(g_nk_ctx, "Settings")) {
-                            g_show_settings = !g_show_settings;
-                            if (g_show_settings)
-                                nk_impl_show_window("Settings", 1);
-                        }
-                        if (nk_button_label(g_nk_ctx, "Split V"))
-                            do_split(LAYOUT_SPLIT_H);
-                        if (nk_button_label(g_nk_ctx, "Split H"))
-                            do_split(LAYOUT_SPLIT_V);
-                        if (nk_button_label(g_nk_ctx, "Close"))
-                            do_close_pane();
-                    }
-                    nk_end(g_nk_ctx);
-
-                    /* ── 우클릭 컨텍스트 메뉴 (복사/붙여넣기 + 분할) ── */
+                    /* ── 우클릭 컨텍스트 메뉴 (복사/붙여넣기 + 분할 + 설정) ── */
                     if (g_show_context_menu) {
                         if (nk_begin(g_nk_ctx, "ctx_menu",
                                      nk_rect(g_context_menu_x, g_context_menu_y, 180, 195),
@@ -1295,6 +1274,7 @@ int main(int argc, char *argv[])
                             if (nk_button_label(g_nk_ctx, "Settings")) {
                                 g_show_settings = 1;
                                 g_show_context_menu = 0;
+                                nk_impl_reset_input();
                                 nk_impl_show_window("Settings", 1);
                             }
                             if (nk_button_label(g_nk_ctx, "Split Vertical")) {
