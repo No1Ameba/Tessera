@@ -174,12 +174,27 @@ static void tab_font(struct nk_context *ctx, termemu_config_t *cfg)
 
 static void tab_window(struct nk_context *ctx, termemu_config_t *cfg)
 {
-    /* Opacity — nk_slider_float: 바 아무 곳 클릭으로 설정 가능 */
+    /* Opacity — 바 클릭으로 위치 이동 (커스텀 slider) */
     nk_layout_row_begin(ctx, NK_DYNAMIC, 30, 2);
     nk_layout_row_push(ctx, 0.3f);
     nk_label(ctx, "Opacity:", NK_TEXT_LEFT);
-    nk_layout_row_push(ctx, 0.5f);
-    nk_slider_float(ctx, 0.1f, &cfg->opacity, 1.0f, 0.01f);
+    nk_layout_row_push(ctx, 0.7f);
+    {
+        struct nk_rect bar = nk_widget_bounds(ctx);
+        struct nk_input *in = &ctx->input;
+
+        /* 바 내부 클릭 (press 또는 hover+down) 시 위치로 opacity 설정 */
+        int hovered = nk_input_is_mouse_hovering_rect(in, bar);
+        int down = nk_input_is_mouse_down(in, NK_BUTTON_LEFT);
+        if (hovered && down) {
+            float rel = (in->mouse.pos.x - bar.x) / bar.w;
+            if (rel < 0.0f) rel = 0.0f;
+            if (rel > 1.0f) rel = 1.0f;
+            cfg->opacity = 0.1f + rel * 0.9f; /* [0.1, 1.0] */
+        }
+        /* 드래그도 지원 */
+        nk_slider_float(ctx, 0.1f, &cfg->opacity, 1.0f, 0.01f);
+    }
     nk_layout_row_end(ctx);
 
     /* 값 표시 */
