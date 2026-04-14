@@ -505,7 +505,7 @@ int ipc_client_connect_remote(ipc_client_t *c, const char *ssh_target)
         /* stderr는 그대로 유지 — SSH 에러 메시지가 보이도록 */
         close(to_child[0]);
         close(from_child[1]);
-        execlp("ssh", "ssh", "-T", "-o", "BatchMode=yes",
+        execlp("ssh", "ssh", "-T",
                ssh_target, "termemu-bridge", (char *)NULL);
         /* exec 실패 시 stderr에 출력 */
         perror("exec ssh");
