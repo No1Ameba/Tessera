@@ -1284,11 +1284,14 @@ int main(int argc, char *argv[])
                                 g_show_context_menu = 0;
                             }
                         }
-                        /* 메뉴 밖 클릭 시 닫기 (nk_end 전에 호출해야 ctx->current 유효) */
-                        if (g_show_context_menu &&
-                            !nk_window_is_hovered(g_nk_ctx) &&
-                            glfwGetMouseButton(g_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
-                            g_show_context_menu = 0;
+                        /* 메뉴 밖 클릭 시 닫기 — 마우스 PRESS 엣지만 감지 */
+                        {
+                            static int prev_left = 0;
+                            int now_left = glfwGetMouseButton(g_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+                            int edge = (!prev_left && now_left);
+                            prev_left = now_left;
+                            if (edge && !nk_window_is_hovered(g_nk_ctx))
+                                g_show_context_menu = 0;
                         }
                         nk_end(g_nk_ctx);
                     }
