@@ -380,6 +380,8 @@ static void handle_mode(screen_t *s, const int *p, size_t n,
                 s->mouse_mode = set ? SCREEN_MOUSE_SGR : SCREEN_MOUSE_NONE;
             } else if (m == 2004) {
                 s->bracketed_paste = set ? 1 : 0;
+            } else if (m == 2026) {
+                s->sync_output = set ? 1 : 0;
             } else if (m == 1049) {
                 /* 대체 화면 전환 */
                 if (set && !s->use_alt) {
@@ -852,6 +854,7 @@ int screen_cursor_hidden(const screen_t *s)    { return s->cursor_hidden; }
 int screen_cursor_style(const screen_t *s)     { return s->cursor_style; }
 int screen_mouse_mode(const screen_t *s)       { return s->mouse_mode; }
 int screen_bracketed_paste(const screen_t *s)  { return s->bracketed_paste; }
+int screen_sync_output(const screen_t *s)      { return s->sync_output; }
 const char *screen_get_title(const screen_t *s){ return s->title; }
 
 void screen_set_clipboard_cb(screen_t *s,

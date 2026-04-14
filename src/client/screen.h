@@ -61,6 +61,7 @@ typedef struct {
     /* 마우스 추적 모드 */
     int mouse_mode;         /* SCREEN_MOUSE_NONE / X10 / SGR */
     int bracketed_paste;    /* ?2004h = 1, ?2004l = 0 */
+    int sync_output;        /* ?2026h = 1 (렌더링 보류), ?2026l = 0 */
 
     /* 커서 상태 */
     int cursor_hidden;      /* ?25l = 1, ?25h = 0 */
@@ -146,6 +147,9 @@ int screen_mouse_mode(const screen_t *s);
 
 /* 브라켓 페이스트 모드 활성 여부 (0/1). */
 int screen_bracketed_paste(const screen_t *s);
+
+/* Synchronized Output 모드 (0=즉시 렌더, 1=렌더 보류). */
+int screen_sync_output(const screen_t *s);
 
 /* 현재 창 타이틀 (OSC 0/2). 비어있으면 "". */
 const char *screen_get_title(const screen_t *s);

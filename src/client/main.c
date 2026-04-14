@@ -156,7 +156,9 @@ static void on_pty_output(uint32_t pane_id, const uint8_t *data, size_t len,
     pane_slot_t *s = pane_slot_find(pane_id);
     if (s) {
         screen_feed(&s->screen, data, len);
-        g_dirty = 1;
+        /* Synchronized Output: sync_output=1이면 렌더링 보류 */
+        if (!screen_sync_output(&s->screen))
+            g_dirty = 1;
     }
 }
 
