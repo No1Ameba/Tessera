@@ -676,14 +676,14 @@ static void char_callback(GLFWwindow *win, unsigned int codepoint)
 {
     (void)win;
 
-    /* key_callback에서 이미 처리된 경우 무시 */
-    if (g_key_consumed) return;
-
-    /* Nuklear 오버레이 활성 상태 */
+    /* Nuklear 오버레이 활성 시 우선 전달 (g_key_consumed 무시) */
     if (g_show_settings || g_show_session_picker || g_show_context_menu) {
         nk_impl_handle_char(codepoint);
         return;
     }
+
+    /* key_callback에서 이미 처리된 경우 무시 */
+    if (g_key_consumed) return;
 
     /* UTF-8로 인코딩해서 PTY에 전송 */
     char utf8[4];
