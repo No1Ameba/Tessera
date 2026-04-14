@@ -13,6 +13,8 @@
 #include <sys/types.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include <time.h>
 
 #define RECV_BUF_SIZE  65536
@@ -500,9 +502,13 @@ int ipc_client_connect_remote(ipc_client_t *c, const char *ssh_target)
         close(from_child[0]);
         dup2(to_child[0], STDIN_FILENO);
         dup2(from_child[1], STDOUT_FILENO);
+        /* stderr는 그대로 유지 — SSH 에러 메시지가 보이도록 */
         close(to_child[0]);
         close(from_child[1]);
-        execlp("ssh", "ssh", "-T", ssh_target, "termemu-bridge", (char *)NULL);
+        execlp("ssh", "ssh", "-T", "-o", "BatchMode=yes",
+               ssh_target, "termemu-bridge", (char *)NULL);
+        /* exec 실패 시 stderr에 출력 */
+        perror("exec ssh");
         _exit(1);
     }
 
@@ -514,20 +520,34 @@ int ipc_client_connect_remote(ipc_client_t *c, const char *ssh_target)
     c->bridge_pid = pid;
     c->fd = -1;
 
+    fprintf(stderr, "[remote] SSH child pid=%d, waiting for HELLO_ACK...\n", (int)pid);
+
     /* SSH 연결 대기 후 HELLO 핸드셰이크 */
     ipc_payload_hello_t hello;
     memset(&hello, 0, sizeof hello);
     hello.client_pid = (uint32_t)getpid();
     strncpy(hello.client_version, "0.1.0", sizeof(hello.client_version) - 1);
 
-    if (send_msg(write_fd(c), IPC_MSG_HELLO, &hello, sizeof hello) != 0)
+    if (send_msg(write_fd(c), IPC_MSG_HELLO, &hello, sizeof hello) != 0) {
+        fprintf(stderr, "[remote] send HELLO failed\n");
         return -1;
+    }
 
     uint8_t ack_buf[256];
     if (recv_until(c, IPC_MSG_HELLO_ACK, ack_buf, sizeof ack_buf,
-                    10000) < 0)  /* SSH는 느릴 수 있으므로 10초 타임아웃 */
+                    15000) < 0) {  /* 15초 — SSH 키 교환 시간 포함 */
+        fprintf(stderr, "[remote] HELLO_ACK timeout — check:\n"
+                        "  1. SSH key auth to '%s' works (ssh %s echo ok)\n"
+                        "  2. termemu-bridge is installed on remote\n"
+                        "  3. termemu-daemon is running on remote\n",
+                ssh_target, ssh_target);
+        /* SSH 자식 프로세스 정리 */
+        kill(pid, SIGTERM);
+        waitpid(pid, NULL, 0);
         return -1;
+    }
 
+    fprintf(stderr, "[remote] connected via SSH bridge\n");
     return 0;
 }
 
