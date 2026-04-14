@@ -79,7 +79,7 @@
 2. [x] **OSC 52 클립보드:** 터미널 앱(vim 등)에서 클립보드 읽기/쓰기 ✅
 3. [x] **Synchronized Output:** `?2026h` — 빠른 출력 시 깜빡임 제거 ✅
 4. [x] **설정 핫 리로드:** inotify로 config.json 변경 감지 → 자동 적용 ✅
-5. [ ] **원격 세션 동기화:** SSH 터널 통한 원격 daemon attach (termemu-bridge + PTY 링 버퍼)
+5. [x] **원격 세션 동기화:** SSH 터널 통한 원격 daemon attach (termemu-bridge + PTY 링 버퍼) ✅
 6. [ ] **Windows IPC:** ConPTY + Named Pipe 구현
 7. [ ] **OSC 8 하이퍼링크:** 클릭 가능한 URL
 8. [ ] **Kitty Image Protocol:** 이미지 인라인 표시

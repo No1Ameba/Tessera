@@ -295,7 +295,45 @@ termemu
 
 ---
 
-## 11. 알려진 제한사항
+## 11. 원격 세션 동기화
+
+### 전제 조건
+
+원격 서버에 `termemu-daemon`과 `termemu-bridge`가 설치되어 있어야 합니다.
+
+### 사용법
+
+```bash
+# 원격 서버의 세션에 attach
+termemu --remote user@server --attach work
+
+# 로컬 daemon의 기존 세션에 attach (두 번째 클라이언트)
+termemu --attach default
+```
+
+### 동작 방식
+
+```
+[local termemu] <--stdin/stdout--> [ssh user@host termemu-bridge] <--socket--> [remote daemon]
+```
+
+1. SSH로 원격의 `termemu-bridge` 실행
+2. bridge가 원격 daemon의 Unix 소켓에 연결
+3. 로컬 클라이언트가 기존 IPC 프로토콜로 통신
+4. `--attach`로 기존 세션에 연결하면:
+   - 세션의 모든 pane 목록 수신
+   - daemon이 각 pane의 PTY 출력 히스토리를 replay
+   - 클라이언트의 VT 파서가 화면 복원
+   - resize 신호로 원격 앱이 화면 다시 그림
+
+### 제한
+
+- 레이아웃(분할 구조)은 원격에서 복원되지 않음 — 균등 분할로 배치
+- SSH 지연이 키 입력 반응에 영향 (PTY 입력은 비동기이므로 정확도에는 무관)
+
+---
+
+## 12. 알려진 제한사항
 
 | 항목 | 상태 |
 |------|------|
@@ -304,7 +342,7 @@ termemu
 | OSC 52 읽기 | 보안상 비활성 (쓰기만 지원) |
 | OSC 8 하이퍼링크 | 미구현 |
 | Kitty Image Protocol | 미구현 |
-| 원격 세션 동기화 | 미구현 (계획됨) |
+| 원격 레이아웃 복원 | attach 시 원래 분할 구조 대신 균등 분할 |
 
 ---
 
