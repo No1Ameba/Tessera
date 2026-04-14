@@ -96,16 +96,72 @@ static void draw_tabs(struct nk_context *ctx)
     nk_spacing(ctx, 1);
 }
 
+/* ── 시스템 모노스페이스 폰트 목록 로드 (fc-list) ─────────────────────────── */
+
+#define FONT_LIST_MAX  128
+#define FONT_NAME_MAX  128
+
+static char  g_font_list[FONT_LIST_MAX][FONT_NAME_MAX];
+static const char *g_font_list_ptrs[FONT_LIST_MAX];
+static int   g_font_list_count = 0;
+static int   g_font_list_loaded = 0;
+
+static void load_font_list(void)
+{
+    if (g_font_list_loaded) return;
+    g_font_list_loaded = 1;
+
+    /* fc-list :spacing=100 : family (모노스페이스 폰트만) */
+    FILE *fp = popen("fc-list :spacing=100 : family 2>/dev/null | sort -u", "r");
+    if (!fp) return;
+
+    char line[256];
+    while (fgets(line, sizeof line, fp) && g_font_list_count < FONT_LIST_MAX) {
+        /* 첫 번째 쉼표까지만 (여러 이름 중 첫 이름) */
+        char *comma = strchr(line, ',');
+        if (comma) *comma = '\0';
+        /* 개행 제거 */
+        size_t ln = strlen(line);
+        while (ln > 0 && (line[ln-1] == '\n' || line[ln-1] == '\r' || line[ln-1] == ' '))
+            line[--ln] = '\0';
+        if (ln == 0) continue;
+        strncpy(g_font_list[g_font_list_count], line, FONT_NAME_MAX - 1);
+        g_font_list[g_font_list_count][FONT_NAME_MAX - 1] = '\0';
+        g_font_list_ptrs[g_font_list_count] = g_font_list[g_font_list_count];
+        g_font_list_count++;
+    }
+    pclose(fp);
+}
+
 /* ── 탭별 내용 ──────────────────────────────────────────────────────────── */
 
 static void tab_font(struct nk_context *ctx, termemu_config_t *cfg)
 {
+    load_font_list();
+
+    /* 현재 폰트의 인덱스 찾기 */
+    int selected = -1;
+    for (int i = 0; i < g_font_list_count; i++) {
+        if (strcmp(g_font_list[i], cfg->font_family) == 0) { selected = i; break; }
+    }
+
     nk_layout_row_begin(ctx, NK_DYNAMIC, 30, 2);
     nk_layout_row_push(ctx, 0.3f);
     nk_label(ctx, "Family:", NK_TEXT_LEFT);
     nk_layout_row_push(ctx, 0.7f);
-    nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD,
-        cfg->font_family, sizeof(cfg->font_family), nk_filter_default);
+    if (g_font_list_count > 0) {
+        int new_sel = nk_combo(ctx, g_font_list_ptrs, g_font_list_count,
+                                selected < 0 ? 0 : selected,
+                                25, nk_vec2(320, 400));
+        if (new_sel != selected && new_sel >= 0 && new_sel < g_font_list_count) {
+            strncpy(cfg->font_family, g_font_list[new_sel], sizeof(cfg->font_family) - 1);
+            cfg->font_family[sizeof(cfg->font_family) - 1] = '\0';
+        }
+    } else {
+        /* fc-list 실패 시 텍스트 입력으로 폴백 */
+        nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD,
+            cfg->font_family, sizeof(cfg->font_family), nk_filter_default);
+    }
     nk_layout_row_end(ctx);
 
     nk_layout_row_begin(ctx, NK_DYNAMIC, 30, 2);
