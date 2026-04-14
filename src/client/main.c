@@ -517,12 +517,10 @@ static void key_callback(GLFWwindow *win, int key, int scancode,
 
     if (action == GLFW_RELEASE) return;
 
-    /* ESC → 설정창 닫기 */
-    if (g_show_settings && key == GLFW_KEY_ESCAPE) {
-        g_show_settings = 0;
-        g_key_consumed = 1;
-        g_dirty = 1;
-        return;
+    /* ESC → 설정창/컨텍스트 메뉴 닫기 */
+    if (key == GLFW_KEY_ESCAPE) {
+        if (g_show_context_menu) { g_show_context_menu = 0; g_key_consumed = 1; g_dirty = 1; return; }
+        if (g_show_settings) { g_show_settings = 0; g_key_consumed = 1; g_dirty = 1; return; }
     }
 
     /* 키 입력 시 선택 해제 */
@@ -634,11 +632,6 @@ static void mouse_button_callback(GLFWwindow *win, int button, int action,
 
     /* Nuklear 오버레이가 열려있으면 터미널에 전달 안 함 */
     if (g_show_settings || g_show_context_menu) {
-        /* 컨텍스트 메뉴 외부 좌클릭 → 닫기 */
-        if (g_show_context_menu && button == GLFW_MOUSE_BUTTON_LEFT &&
-            action == GLFW_PRESS) {
-            g_show_context_menu = 0;
-        }
         return;
     }
 
@@ -657,6 +650,7 @@ static void mouse_button_callback(GLFWwindow *win, int button, int action,
         g_context_menu_x = (float)mx;
         g_context_menu_y = (float)my;
         g_dirty = 1;
+        nk_impl_reset_input();
         return;
     }
 
@@ -1237,8 +1231,8 @@ int main(int argc, char *argv[])
                     /* ── 우클릭 컨텍스트 메뉴 (복사/붙여넣기 + 분할 + 설정) ── */
                     if (g_show_context_menu) {
                         if (nk_begin(g_nk_ctx, "ctx_menu",
-                                     nk_rect(g_context_menu_x, g_context_menu_y, 180, 195),
-                                     NK_WINDOW_BORDER | NK_WINDOW_NO_SCROLLBAR))
+                                     nk_rect(g_context_menu_x, g_context_menu_y, 180, 250),
+                                     NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR))
                         {
                             nk_layout_row_dynamic(g_nk_ctx, 28, 1);
                             if (nk_button_label(g_nk_ctx, "Copy")) {
@@ -1291,6 +1285,13 @@ int main(int argc, char *argv[])
                             }
                         }
                         nk_end(g_nk_ctx);
+
+                        /* 메뉴 밖 클릭 시 닫기 — Nuklear가 버튼 클릭을 먼저 처리한 후 */
+                        if (g_show_context_menu &&
+                            !nk_window_is_hovered(g_nk_ctx) &&
+                            glfwGetMouseButton(g_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
+                            g_show_context_menu = 0;
+                        }
                     }
 
                     /* ── 설정 오버레이 ── */
