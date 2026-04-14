@@ -1157,21 +1157,73 @@ int main(int argc, char *argv[])
         fprintf(stderr, "[termemu] attached to session '%s' (%d panes)\n",
                 attach_name, pane_count);
     } else {
-        /* ── 새 세션 생성 모드 ── */
-        ipc_client_session_create(g_client, "default", &g_session_id);
-        ipc_client_window_create(g_client, g_session_id, "1", &g_window_id);
-
-        uint32_t first_pane = 0;
-        ipc_client_pane_create(g_client, g_session_id, g_window_id,
-                                (uint16_t)cols, (uint16_t)rows, &first_pane);
-
-        pane_slot_t *first_slot = pane_slot_alloc(first_pane, cols, rows);
-        if (first_slot) {
-            screen_apply_theme(&first_slot->screen, g_theme);
-            screen_set_clipboard_cb(&first_slot->screen, on_clipboard_set, NULL);
+        /* ── 새 세션 생성 OR 기존 "default" 자동 attach ── */
+        ipc_session_info_t sessions[64];
+        int sess_count = 0;
+        ipc_client_session_list(g_client, sessions, 64, &sess_count);
+        uint32_t existing_sid = 0;
+        for (int i = 0; i < sess_count; i++) {
+            if (strcmp(sessions[i].name, "default") == 0) {
+                existing_sid = sessions[i].session_id;
+                break;
+            }
         }
-        g_active_pane = first_pane;
-        g_layout = layout_create_leaf(first_pane, 0, 0, g_win_w, g_win_h);
+
+        if (existing_sid) {
+            /* 기존 세션이 있음 (이전 크래시 잔재 등) → attach */
+            fprintf(stderr, "[termemu] existing 'default' session found, attaching\n");
+            ipc_attach_pane_info_t panes[64];
+            int pane_count = 0;
+            if (ipc_client_session_attach(g_client, existing_sid,
+                                           panes, 64, &pane_count) == 0) {
+                g_session_id = existing_sid;
+                if (pane_count > 0) g_window_id = panes[0].window_id;
+                for (int i = 0; i < pane_count; i++) {
+                    pane_slot_t *ps = pane_slot_alloc(panes[i].pane_id,
+                                                       panes[i].cols, panes[i].rows);
+                    if (ps) {
+                        screen_apply_theme(&ps->screen, g_theme);
+                        screen_set_clipboard_cb(&ps->screen, on_clipboard_set, NULL);
+                    }
+                    if (i == 0) {
+                        g_active_pane = panes[i].pane_id;
+                        g_layout = layout_create_leaf(panes[i].pane_id,
+                                                       0, 0, g_win_w, g_win_h);
+                    } else if (g_layout) {
+                        layout_node_t *cur = layout_find_pane(g_layout, g_active_pane);
+                        if (cur) {
+                            layout_split(cur, LAYOUT_SPLIT_H, 0.5f, panes[i].pane_id);
+                            layout_node_t *r = cur;
+                            while (r->parent) r = r->parent;
+                            g_layout = r;
+                        }
+                    }
+                }
+                if (g_layout) {
+                    layout_resize_root(g_layout, 0, 0, g_win_w, g_win_h);
+                    resize_ctx_t rctx = { g_client, g_session_id, g_window_id, fw, fh };
+                    layout_each_leaf(g_layout, resize_leaf_cb, &rctx);
+                }
+                for (int i = 0; i < pane_count; i++)
+                    ipc_client_pane_replay(g_client, panes[i].pane_id);
+            }
+        } else {
+            /* 신규 세션 생성 */
+            ipc_client_session_create(g_client, "default", &g_session_id);
+            ipc_client_window_create(g_client, g_session_id, "1", &g_window_id);
+
+            uint32_t first_pane = 0;
+            ipc_client_pane_create(g_client, g_session_id, g_window_id,
+                                    (uint16_t)cols, (uint16_t)rows, &first_pane);
+
+            pane_slot_t *first_slot = pane_slot_alloc(first_pane, cols, rows);
+            if (first_slot) {
+                screen_apply_theme(&first_slot->screen, g_theme);
+                screen_set_clipboard_cb(&first_slot->screen, on_clipboard_set, NULL);
+            }
+            g_active_pane = first_pane;
+            g_layout = layout_create_leaf(first_pane, 0, 0, g_win_w, g_win_h);
+        }
     }
 
     /* ── 설정 핫 리로드 감시 ────────────────────────────────────────────── */
