@@ -43,6 +43,7 @@
 #include "screen.h"
 #include "../common/config.h"
 #include "../common/utf8.h"
+#include "../platform/fs_watch.h"
 
 /* ── Pane registry ───────────────────────────────────────────────────────── */
 
@@ -970,12 +971,19 @@ int main(int argc, char *argv[])
     g_active_pane = first_pane;
     g_layout = layout_create_leaf(first_pane, 0, 0, g_win_w, g_win_h);
 
+    /* ── 설정 핫 리로드 감시 ────────────────────────────────────────────── */
+    void *fs_watcher = fs_watch_create();
+    if (fs_watcher) {
+        if (g_cfg_path[0])   fs_watch_add(fs_watcher, g_cfg_path);
+        if (g_theme_path[0]) fs_watch_add(fs_watcher, g_theme_path);
+    }
+
     /* ── Event loop ──────────────────────────────────────────────────────── */
     while (!glfwWindowShouldClose(g_window) && g_running) {
         glfwPollEvents();
 
-        /* SIGHUP → config + theme 재로드 */
-        if (g_sighup) {
+        /* SIGHUP 또는 inotify → config + theme 재로드 */
+        if (g_sighup || (fs_watcher && fs_watch_poll(fs_watcher) > 0)) {
             g_sighup = 0;
             do_config_reload();
         }
@@ -1098,6 +1106,7 @@ int main(int argc, char *argv[])
     ipc_client_disconnect(g_client);
     ipc_client_destroy(g_client);
 
+    if (fs_watcher) fs_watch_destroy(fs_watcher);
     nk_impl_shutdown();
     gl_renderer_destroy(g_renderer);
     glyph_atlas_destroy(atlas);
