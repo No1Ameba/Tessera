@@ -1040,8 +1040,9 @@ int main(int argc, char *argv[])
             layout_each_leaf(g_layout, resize_leaf_cb, &rctx);
         }
 
-        /* PTY replay 수신 (ipc_client_poll에서 자동 처리) */
-        ipc_client_poll(g_client, 500);
+        /* PTY 히스토리 replay 요청 (pane_slot 생성 완료 후이므로 안전) */
+        for (int i = 0; i < pane_count; i++)
+            ipc_client_pane_replay(g_client, panes[i].pane_id);
 
         fprintf(stderr, "[termemu] attached to session '%s' (%d panes)\n",
                 attach_name, pane_count);

@@ -592,13 +592,57 @@ static void handle_session_attach(ipc_server_t *srv, int client_fd,
     memcpy(buf + sizeof(hdr) + sizeof(resp), panes, arr_sz);
     write(client_fd, buf, sizeof(hdr) + total);
 
-    /* PTY 링 버퍼 replay는 여기서 하지 않는다.
-     * 이유: recv_until()이 ATTACH_R을 기다리는 동안 PTY_OUTPUT이 도착하면
-     * 클라이언트의 pane_slot이 아직 생성 전이라 데이터가 드롭된다.
-     *
-     * 대신 클라이언트가 pane_slot 생성 후 PANE_RESIZE를 보내면
-     * SIGWINCH로 원격 앱이 화면을 다시 그린다. */
-    (void)0; /* 링 버퍼 인프라는 유지 — 향후 별도 replay 메시지로 활용 */
+    /* replay는 별도 PANE_REPLAY 메시지로 요청 (pane_slot 생성 후) */
+}
+
+/* ── PANE_REPLAY — 링 버퍼 재전송 ────────────────────────────────────────── */
+
+static void handle_pane_replay(ipc_server_t *srv, int client_fd,
+                                const uint8_t *payload, uint16_t plen)
+{
+    if (plen < sizeof(uint32_t)) return;
+    uint32_t pane_id = *(const uint32_t *)payload;
+
+    ipc_pane_slot_t *ps = NULL;
+    for (int j = 0; j < IPC_MAX_PANES; j++) {
+        if (srv->panes[j].pty_fd >= 0 && srv->panes[j].pane_id == pane_id) {
+            ps = &srv->panes[j];
+            break;
+        }
+    }
+    if (!ps || ps->ring_count == 0) {
+        /* 빈 버퍼 — OK 응답 */
+        ipc_msg_header_t ok = IPC_HEADER_INIT(IPC_MSG_OK, 0);
+        write(client_fd, &ok, sizeof(ok));
+        return;
+    }
+
+    size_t start = (ps->ring_head + PANE_RING_SIZE - ps->ring_count) % PANE_RING_SIZE;
+    size_t remaining = ps->ring_count;
+
+    while (remaining > 0) {
+        size_t chunk = remaining > IPC_PTY_CHUNK_MAX ? IPC_PTY_CHUNK_MAX : remaining;
+        uint8_t tmp[IPC_PTY_CHUNK_MAX];
+        for (size_t k = 0; k < chunk; k++)
+            tmp[k] = ps->ring[(start + k) % PANE_RING_SIZE];
+
+        ipc_payload_pty_data_t dh;
+        dh.pane_id  = pane_id;
+        dh.data_len = (uint16_t)chunk;
+
+        uint16_t msg_len = (uint16_t)(sizeof(dh) + chunk);
+        ipc_msg_header_t mh = IPC_HEADER_INIT(IPC_MSG_PTY_OUTPUT, msg_len);
+        write(client_fd, &mh, sizeof(mh));
+        write(client_fd, &dh, sizeof(dh));
+        write(client_fd, tmp, chunk);
+
+        start = (start + chunk) % PANE_RING_SIZE;
+        remaining -= chunk;
+    }
+
+    /* 완료 마커 */
+    ipc_msg_header_t ok = IPC_HEADER_INIT(IPC_MSG_OK, 0);
+    write(client_fd, &ok, sizeof(ok));
 }
 
 static void dispatch_message(ipc_server_t *srv, int client_fd,
@@ -622,6 +666,9 @@ static void dispatch_message(ipc_server_t *srv, int client_fd,
             break;
         case IPC_MSG_SESSION_ATTACH:
             handle_session_attach(srv, client_fd, payload, hdr->payload_len);
+            break;
+        case IPC_MSG_PANE_REPLAY:
+            handle_pane_replay(srv, client_fd, payload, hdr->payload_len);
             break;
         case IPC_MSG_WINDOW_CREATE:
             handle_window_create(srv, client_fd, payload, hdr->payload_len);

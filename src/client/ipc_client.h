@@ -69,6 +69,13 @@ int ipc_client_session_attach(ipc_client_t *c, uint32_t session_id,
                                ipc_attach_pane_info_t *panes_out, int max_panes,
                                int *out_count);
 
+/*
+ * pane의 PTY 출력 히스토리를 요청한다.
+ * daemon이 링 버퍼 내용을 PTY_OUTPUT으로 전송한다.
+ * pane_slot이 생성된 후에 호출해야 데이터가 정상 수신된다.
+ */
+int ipc_client_pane_replay(ipc_client_t *c, uint32_t pane_id);
+
 /* ── Window ──────────────────────────────────────────────────────────────── */
 
 int ipc_client_window_create(ipc_client_t *c, uint32_t session_id,

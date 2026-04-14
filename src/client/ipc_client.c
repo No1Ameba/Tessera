@@ -587,3 +587,15 @@ int ipc_client_session_attach(ipc_client_t *c, uint32_t session_id,
     *out_count = cnt;
     return 0;
 }
+
+/* ── pane replay ─────────────────────────────────────────────────────────── */
+
+int ipc_client_pane_replay(ipc_client_t *c, uint32_t pane_id)
+{
+    if (!c) return -1;
+    if (send_msg(write_fd(c), IPC_MSG_PANE_REPLAY, &pane_id, sizeof pane_id) != 0)
+        return -1;
+    /* daemon이 PTY_OUTPUT 메시지를 여러 개 보낸 뒤 OK로 완료.
+     * recv_until(OK)가 중간의 PTY_OUTPUT을 콜백으로 dispatch한다. */
+    return recv_until(c, IPC_MSG_OK, NULL, 0, CMD_TIMEOUT_MS) < 0 ? -1 : 0;
+}
