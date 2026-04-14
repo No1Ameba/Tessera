@@ -328,7 +328,6 @@ void nk_impl_render(void)
 int nk_impl_handle_key(int key, int scancode, int action, int mods)
 {
     (void)scancode; (void)mods;
-    if (!nk_gl.is_active) return 0;
 
     int down = (action != GLFW_RELEASE);
     struct nk_context *ctx = &nk_gl.ctx;
@@ -349,7 +348,6 @@ int nk_impl_handle_key(int key, int scancode, int action, int mods)
 
 int nk_impl_handle_char(unsigned int codepoint)
 {
-    if (!nk_gl.is_active) return 0;
     nk_input_unicode(&nk_gl.ctx, codepoint);
     return 1;
 }

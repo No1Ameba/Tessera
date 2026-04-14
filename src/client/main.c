@@ -598,8 +598,9 @@ static void key_callback(GLFWwindow *win, int key, int scancode,
         g_dirty = 1;
     }
 
-    /* Nuklear가 활성 상태면 입력 우선 */
-    if (g_show_settings && nk_impl_handle_key(key, scancode, action, mods)) {
+    /* Nuklear 오버레이 활성 시 키 입력 전달 */
+    if (g_show_settings || g_show_session_picker || g_show_context_menu) {
+        nk_impl_handle_key(key, scancode, action, mods);
         g_key_consumed = 1;
         return;
     }
@@ -678,8 +679,8 @@ static void char_callback(GLFWwindow *win, unsigned int codepoint)
     /* key_callback에서 이미 처리된 경우 무시 */
     if (g_key_consumed) return;
 
-    /* Nuklear가 활성 상태 */
-    if (g_show_settings) {
+    /* Nuklear 오버레이 활성 상태 */
+    if (g_show_settings || g_show_session_picker || g_show_context_menu) {
         nk_impl_handle_char(codepoint);
         return;
     }
