@@ -525,7 +525,7 @@ int ipc_client_connect_remote(ipc_client_t *c, const char *ssh_target)
 
     uint8_t ack_buf[256];
     if (recv_until(c, IPC_MSG_HELLO_ACK, ack_buf, sizeof ack_buf,
-                    10000) != 0)  /* SSH는 느릴 수 있으므로 10초 타임아웃 */
+                    10000) < 0)  /* SSH는 느릴 수 있으므로 10초 타임아웃 */
         return -1;
 
     return 0;
@@ -539,14 +539,20 @@ int ipc_client_session_attach(ipc_client_t *c, uint32_t session_id,
 {
     if (!c || !panes_out || !out_count) return -1;
 
+    fprintf(stderr, "[attach] sending SESSION_ATTACH session_id=%u\n", session_id);
     ipc_payload_session_attach_t req = { .session_id = session_id };
-    if (send_msg(write_fd(c), IPC_MSG_SESSION_ATTACH, &req, sizeof req) != 0)
+    if (send_msg(write_fd(c), IPC_MSG_SESSION_ATTACH, &req, sizeof req) != 0) {
+        fprintf(stderr, "[attach] send_msg failed\n");
         return -1;
+    }
 
+    fprintf(stderr, "[attach] waiting for SESSION_ATTACH_R (timeout=%dms)...\n", CMD_TIMEOUT_MS);
     uint8_t buf[IPC_MAX_PAYLOAD_LEN];
     if (recv_until(c, IPC_MSG_SESSION_ATTACH_R, buf, sizeof buf,
-                    CMD_TIMEOUT_MS) != 0)
+                    CMD_TIMEOUT_MS) < 0) {
+        fprintf(stderr, "[attach] recv_until failed (timeout or error)\n");
         return -1;
+    }
 
     const ipc_payload_session_attach_r_t *resp =
         (const ipc_payload_session_attach_r_t *)buf;
