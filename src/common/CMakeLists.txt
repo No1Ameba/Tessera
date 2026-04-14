@@ -2,6 +2,7 @@ add_library(termemu_common STATIC
     vt_parser.c
     config.c
     utf8.c
+    session_file.c
 )
 
 target_include_directories(termemu_common

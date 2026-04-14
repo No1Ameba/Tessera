@@ -3,6 +3,7 @@
 #include "ipc_server.h"
 #include "session.h"
 #include "../common/ipc_proto.h"
+#include "../common/session_file.h"
 #include "../platform/ipc.h"
 #include "../platform/termemu_pty.h"
 
@@ -13,6 +14,8 @@
 #include <string.h>
 #include <poll.h>
 #include <sys/epoll.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ─── 상수 ───────────────────────────────────────────────────────────────── */
@@ -598,6 +601,95 @@ static void handle_session_attach(ipc_server_t *srv, int client_fd,
 
 /* ── PANE_REPLAY — 링 버퍼 재전송 ────────────────────────────────────────── */
 
+/* ── SESSION_SAVE — 세션 스냅샷 (JSON) ───────────────────────────────────── */
+
+static void handle_session_save(ipc_server_t *srv, int client_fd,
+                                 const uint8_t *payload, uint16_t plen)
+{
+    if (plen < sizeof(uint32_t)) {
+        send_error(client_fd, IPC_MSG_SESSION_SAVE,
+                   IPC_ERR_INVALID_MSG, "payload too small");
+        return;
+    }
+    uint32_t sid = *(const uint32_t *)payload;
+    session_t *s = session_find_by_id(srv->session_mgr, sid);
+    if (!s) {
+        send_error(client_fd, IPC_MSG_SESSION_SAVE,
+                   IPC_ERR_SESSION_NOT_FOUND, "session not found");
+        return;
+    }
+
+    /* session_snapshot_t 생성 */
+    session_snapshot_t snap;
+    memset(&snap, 0, sizeof snap);
+    strncpy(snap.name, s->name, SNAP_NAME_MAX - 1);
+
+    int wi = 0;
+    int aw_idx = 0;
+    for (window_t *w = s->windows; w && wi < SNAP_MAX_WINDOWS; w = w->next, wi++) {
+        snap_window_t *sw = &snap.windows[wi];
+        strncpy(sw->name, w->name, SNAP_NAME_MAX - 1);
+        if (w == s->active_window) aw_idx = wi;
+
+        int pi = 0;
+        int ap_idx = 0;
+        for (pane_t *p = w->panes; p && pi < SNAP_MAX_PANES; p = p->next, pi++) {
+            snap_pane_t *sp = &sw->panes[pi];
+            sp->cols = p->cols;
+            sp->rows = p->rows;
+            if (p == w->active_pane) ap_idx = pi;
+
+            /* /proc/<pid>/cwd로 작업 디렉토리 읽기 */
+            if (p->pid > 0) {
+                char proc_path[64];
+                snprintf(proc_path, sizeof proc_path, "/proc/%d/cwd", p->pid);
+                ssize_t len = readlink(proc_path, sp->cwd, SNAP_CWD_MAX - 1);
+                if (len > 0) sp->cwd[len] = '\0';
+            }
+        }
+        sw->pane_count = pi;
+        sw->active_pane = ap_idx;
+    }
+    snap.window_count = wi;
+    snap.active_window = aw_idx;
+
+    /* 임시 파일에 JSON 직렬화 후 읽어서 전송 */
+    char tmp_path[64];
+    snprintf(tmp_path, sizeof tmp_path, "/tmp/termemu-snap-%d.json", (int)getpid());
+    if (session_snapshot_save(tmp_path, &snap) != 0) {
+        send_error(client_fd, IPC_MSG_SESSION_SAVE,
+                   IPC_ERR_UNKNOWN, "snapshot serialize failed");
+        return;
+    }
+    FILE *fp = fopen(tmp_path, "r");
+    if (!fp) {
+        send_error(client_fd, IPC_MSG_SESSION_SAVE,
+                   IPC_ERR_UNKNOWN, "snapshot read failed");
+        unlink(tmp_path);
+        return;
+    }
+    fseek(fp, 0, SEEK_END);
+    long json_len = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (json_len <= 0 || json_len > IPC_MAX_PAYLOAD_LEN) {
+        fclose(fp);
+        unlink(tmp_path);
+        send_error(client_fd, IPC_MSG_SESSION_SAVE,
+                   IPC_ERR_UNKNOWN, "snapshot too large");
+        return;
+    }
+    char *json_buf = malloc((size_t)json_len);
+    if (!json_buf) { fclose(fp); unlink(tmp_path); return; }
+    fread(json_buf, 1, (size_t)json_len, fp);
+    fclose(fp);
+    unlink(tmp_path);
+
+    ipc_msg_header_t hdr = IPC_HEADER_INIT(IPC_MSG_SESSION_SAVE_R, (uint16_t)json_len);
+    write(client_fd, &hdr, sizeof hdr);
+    write(client_fd, json_buf, (size_t)json_len);
+    free(json_buf);
+}
+
 static void handle_pane_replay(ipc_server_t *srv, int client_fd,
                                 const uint8_t *payload, uint16_t plen)
 {
@@ -670,6 +762,9 @@ static void dispatch_message(ipc_server_t *srv, int client_fd,
             break;
         case IPC_MSG_PANE_REPLAY:
             handle_pane_replay(srv, client_fd, payload, hdr->payload_len);
+            break;
+        case IPC_MSG_SESSION_SAVE:
+            handle_session_save(srv, client_fd, payload, hdr->payload_len);
             break;
         case IPC_MSG_WINDOW_CREATE:
             handle_window_create(srv, client_fd, payload, hdr->payload_len);
@@ -931,6 +1026,50 @@ int ipc_server_run(ipc_server_t *srv) {
                 } else {
                     /* PTY 출력 데이터 */
                     pty_output_read(srv, fd);
+                }
+            }
+        }
+
+        /* ── 자동 저장 ── */
+        {
+            static time_t last_save = 0;
+            if (last_save == 0) last_save = time(NULL);
+            time_t now = time(NULL);
+            int interval = 300; /* TODO: config에서 읽기 */
+            if (interval > 0 && (now - last_save) >= interval) {
+                last_save = now;
+                /* 모든 세션 스냅샷 저장 */
+                char dir[256];
+                const char *home = getenv("HOME");
+                if (home) {
+                    snprintf(dir, sizeof dir, "%s/.config/termemu/sessions", home);
+                    mkdir(dir, 0755);  /* 디렉토리 없으면 생성 */
+                    for (session_t *s = srv->session_mgr->head; s; s = s->next) {
+                        session_snapshot_t snap;
+                        memset(&snap, 0, sizeof snap);
+                        strncpy(snap.name, s->name, SNAP_NAME_MAX - 1);
+                        int wi = 0;
+                        for (window_t *w = s->windows; w && wi < SNAP_MAX_WINDOWS; w = w->next, wi++) {
+                            snap_window_t *sw = &snap.windows[wi];
+                            strncpy(sw->name, w->name, SNAP_NAME_MAX - 1);
+                            int pi = 0;
+                            for (pane_t *p = w->panes; p && pi < SNAP_MAX_PANES; p = p->next, pi++) {
+                                sw->panes[pi].cols = p->cols;
+                                sw->panes[pi].rows = p->rows;
+                                if (p->pid > 0) {
+                                    char pp[64];
+                                    snprintf(pp, sizeof pp, "/proc/%d/cwd", p->pid);
+                                    ssize_t l = readlink(pp, sw->panes[pi].cwd, SNAP_CWD_MAX - 1);
+                                    if (l > 0) sw->panes[pi].cwd[l] = '\0';
+                                }
+                            }
+                            sw->pane_count = pi;
+                        }
+                        snap.window_count = wi;
+                        char fpath[512];
+                        snprintf(fpath, sizeof fpath, "%s/%s.json", dir, s->name);
+                        session_snapshot_save(fpath, &snap);
+                    }
                 }
             }
         }

@@ -169,6 +169,7 @@ void config_defaults(termemu_config_t *cfg) {
     cfg->cursor_blink     = true;
     strncpy(cfg->theme_name, "default", sizeof(cfg->theme_name) - 1);
     cfg->bell_visual      = false;
+    cfg->autosave_interval = 300;  /* 기본 5분 */
 
     keybindings_t *kb = &cfg->keybindings;
     strncpy(kb->split_vertical,   "Alt+minus",   sizeof(kb->split_vertical) - 1);

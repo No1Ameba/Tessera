@@ -43,6 +43,7 @@
 #include "screen.h"
 #include "../common/config.h"
 #include "../common/utf8.h"
+#include "../common/session_file.h"
 #include "../platform/fs_watch.h"
 
 /* ── Pane registry ───────────────────────────────────────────────────────── */
@@ -839,11 +840,50 @@ int main(int argc, char *argv[])
     /* CLI 인자 파싱 */
     const char *remote_target = NULL;
     const char *attach_name   = NULL;
+    const char *export_session = NULL;
+    const char *export_path    = NULL;
+    const char *import_path    = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--remote") == 0 && i + 1 < argc)
             remote_target = argv[++i];
         else if (strcmp(argv[i], "--attach") == 0 && i + 1 < argc)
             attach_name = argv[++i];
+        else if (strcmp(argv[i], "--export") == 0 && i + 2 < argc) {
+            export_session = argv[++i];
+            export_path = argv[++i];
+        }
+        else if (strcmp(argv[i], "--import") == 0 && i + 1 < argc)
+            import_path = argv[++i];
+    }
+
+    /* --export: GUI 없이 세션 저장 후 종료 */
+    if (export_session && export_path) {
+        ipc_client_t *ec = ipc_client_create(NULL, NULL);
+        if (ipc_client_connect(ec) != 0) {
+            fprintf(stderr, "Failed to connect to daemon\n"); return 1;
+        }
+        ipc_session_info_t sessions[64];
+        int sc = 0;
+        ipc_client_session_list(ec, sessions, 64, &sc);
+        uint32_t sid = 0;
+        for (int i = 0; i < sc; i++)
+            if (strcmp(sessions[i].name, export_session) == 0)
+                { sid = sessions[i].session_id; break; }
+        if (!sid) {
+            fprintf(stderr, "Session '%s' not found\n", export_session);
+            return 1;
+        }
+        session_snapshot_t snap;
+        if (ipc_client_session_save(ec, sid, &snap) != 0) {
+            fprintf(stderr, "Failed to get session snapshot\n"); return 1;
+        }
+        if (session_snapshot_save(export_path, &snap) != 0) {
+            fprintf(stderr, "Failed to write %s\n", export_path); return 1;
+        }
+        fprintf(stderr, "Exported session '%s' to %s\n", export_session, export_path);
+        ipc_client_disconnect(ec);
+        ipc_client_destroy(ec);
+        return 0;
     }
 
     termemu_config_t cfg = {0};
@@ -980,7 +1020,75 @@ int main(int argc, char *argv[])
     int cols = g_win_w / fw; if (cols < 1) cols = 80;
     int rows = g_win_h / fh; if (rows < 1) rows = 24;
 
-    if (attach_name) {
+    if (import_path) {
+        /* ── Import 모드: JSON 파일에서 세션 복원 ── */
+        session_snapshot_t snap;
+        if (session_snapshot_load(import_path, &snap) != 0) {
+            fprintf(stderr, "Failed to load %s\n", import_path); return 1;
+        }
+        fprintf(stderr, "[termemu] importing session '%s' (%d windows)\n",
+                snap.name, snap.window_count);
+
+        ipc_client_session_create(g_client, snap.name, &g_session_id);
+
+        int total_panes = 0;
+        for (int wi = 0; wi < snap.window_count; wi++) {
+            snap_window_t *sw = &snap.windows[wi];
+            uint32_t wid = 0;
+            ipc_client_window_create(g_client, g_session_id, sw->name, &wid);
+            if (wi == 0) g_window_id = wid;
+
+            for (int pi = 0; pi < sw->pane_count; pi++) {
+                snap_pane_t *sp = &sw->panes[pi];
+                uint16_t pc = sp->cols > 0 ? sp->cols : (uint16_t)cols;
+                uint16_t pr = sp->rows > 0 ? sp->rows : (uint16_t)rows;
+                uint32_t pid = 0;
+                ipc_client_pane_create(g_client, g_session_id, wid, pc, pr, &pid);
+
+                pane_slot_t *ps = pane_slot_alloc(pid, pc, pr);
+                if (ps) {
+                    screen_apply_theme(&ps->screen, g_theme);
+                    screen_set_clipboard_cb(&ps->screen, on_clipboard_set, NULL);
+                }
+
+                /* cwd가 있으면 cd 명령 전송 */
+                if (sp->cwd[0]) {
+                    char cd_cmd[SNAP_CWD_MAX + 8];
+                    int cd_len = snprintf(cd_cmd, sizeof cd_cmd, "cd %s\n", sp->cwd);
+                    if (cd_len > 0)
+                        ipc_client_pty_input(g_client, pid,
+                                             (const uint8_t *)cd_cmd, (size_t)cd_len);
+                    /* clear 전송 — cd 출력 정리 */
+                    ipc_client_pty_input(g_client, pid,
+                                         (const uint8_t *)"clear\n", 6);
+                }
+
+                if (total_panes == 0) {
+                    g_active_pane = pid;
+                    g_layout = layout_create_leaf(pid, 0, MENU_BAR_H,
+                                                   g_win_w, g_win_h - MENU_BAR_H);
+                } else if (g_layout) {
+                    layout_node_t *cur = layout_find_pane(g_layout, g_active_pane);
+                    if (cur) {
+                        layout_split(cur, LAYOUT_SPLIT_H, 0.5f, pid);
+                        layout_node_t *r = cur;
+                        while (r->parent) r = r->parent;
+                        g_layout = r;
+                    }
+                }
+                total_panes++;
+            }
+        }
+
+        if (g_layout) {
+            layout_resize_root(g_layout, 0, MENU_BAR_H, g_win_w, g_win_h - MENU_BAR_H);
+            resize_ctx_t rctx = { g_client, g_session_id, g_window_id, fw, fh };
+            layout_each_leaf(g_layout, resize_leaf_cb, &rctx);
+        }
+
+        /* 초기 출력 수신 */
+        ipc_client_poll(g_client, 300);
+    } else if (attach_name) {
         /* ── Attach 모드: 기존 세션에 연결 ── */
         ipc_session_info_t sessions[64];
         int sess_count = 0;

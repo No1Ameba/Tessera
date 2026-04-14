@@ -42,6 +42,8 @@ typedef enum {
     IPC_MSG_SESSION_ATTACH  = 0x15,  /* C→D  기존 세션 attach 요청 */
     IPC_MSG_SESSION_ATTACH_R = 0x16, /* D→C  세션 트리 (페인 목록) 응답 */
     IPC_MSG_PANE_REPLAY     = 0x17,  /* C→D  pane PTY 출력 히스토리 요청 */
+    IPC_MSG_SESSION_SAVE    = 0x18,  /* C→D  세션 스냅샷 요청 (JSON 응답) */
+    IPC_MSG_SESSION_SAVE_R  = 0x19,  /* D→C  세션 스냅샷 JSON 페이로드 */
 
     /* ── 윈도우 ─────────────────────────── */
     IPC_MSG_WINDOW_CREATE   = 0x20,  /* C→D  윈도우 생성 요청 */

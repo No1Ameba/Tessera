@@ -73,6 +73,7 @@ typedef struct {
     bool           cursor_blink;
     char           theme_name[256];
     bool           bell_visual;
+    int            autosave_interval;  /* 자동 저장 주기 (초, 0=비활성) */
     keybindings_t  keybindings;
 } termemu_config_t;
 

@@ -588,6 +588,35 @@ int ipc_client_session_attach(ipc_client_t *c, uint32_t session_id,
     return 0;
 }
 
+/* ── 세션 스냅샷 ─────────────────────────────────────────────────────────── */
+
+int ipc_client_session_save(ipc_client_t *c, uint32_t session_id,
+                             session_snapshot_t *out)
+{
+    if (!c || !out) return -1;
+    if (send_msg(write_fd(c), IPC_MSG_SESSION_SAVE,
+                 &session_id, sizeof session_id) != 0)
+        return -1;
+
+    /* daemon이 JSON 문자열을 전송한다 */
+    uint8_t json_buf[IPC_MAX_PAYLOAD_LEN];
+    if (recv_until(c, IPC_MSG_SESSION_SAVE_R, json_buf, sizeof json_buf,
+                    CMD_TIMEOUT_MS) < 0)
+        return -1;
+
+    /* JSON을 임시 파일에 쓰고 session_snapshot_load로 파싱 */
+    char tmp_path[64];
+    snprintf(tmp_path, sizeof tmp_path, "/tmp/termemu-snap-cli-%d.json", (int)getpid());
+    FILE *fp = fopen(tmp_path, "w");
+    if (!fp) return -1;
+    /* json_buf의 실제 크기는 알 수 없으므로 NULL-terminated 가정 */
+    fputs((const char *)json_buf, fp);
+    fclose(fp);
+    int ret = session_snapshot_load(tmp_path, out);
+    unlink(tmp_path);
+    return ret;
+}
+
 /* ── pane replay ─────────────────────────────────────────────────────────── */
 
 int ipc_client_pane_replay(ipc_client_t *c, uint32_t pane_id)

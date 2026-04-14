@@ -17,6 +17,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "../common/ipc_proto.h"
+#include "../common/session_file.h"
+#include "../common/ipc_proto.h"
 
 typedef struct ipc_client ipc_client_t;
 
@@ -75,6 +77,13 @@ int ipc_client_session_attach(ipc_client_t *c, uint32_t session_id,
  * pane_slot이 생성된 후에 호출해야 데이터가 정상 수신된다.
  */
 int ipc_client_pane_replay(ipc_client_t *c, uint32_t pane_id);
+
+/*
+ * 세션 스냅샷을 daemon에서 가져온다.
+ * daemon이 각 pane의 /proc/PID/cwd를 읽어 cwd를 채운다.
+ */
+int ipc_client_session_save(ipc_client_t *c, uint32_t session_id,
+                             session_snapshot_t *out);
 
 /* ── Window ──────────────────────────────────────────────────────────────── */
 
