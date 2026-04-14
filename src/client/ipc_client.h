@@ -41,6 +41,15 @@ void          ipc_client_destroy(ipc_client_t *c);
  * @return 0 success, -1 failure.
  */
 int  ipc_client_connect(ipc_client_t *c);
+
+/*
+ * SSH를 통해 원격 daemon에 연결한다.
+ * ssh_target: "user@host" 형태.
+ * 원격에 termemu-bridge가 설치되어 있어야 한다.
+ * @return 0 success, -1 failure.
+ */
+int  ipc_client_connect_remote(ipc_client_t *c, const char *ssh_target);
+
 void ipc_client_disconnect(ipc_client_t *c);
 
 /* ── Session ─────────────────────────────────────────────────────────────── */
@@ -50,6 +59,15 @@ int ipc_client_session_create(ipc_client_t *c, const char *name,
 int ipc_client_session_destroy(ipc_client_t *c, uint32_t session_id);
 int ipc_client_session_list(ipc_client_t *c,
                              ipc_session_info_t *buf, int max, int *out_count);
+
+/*
+ * 기존 세션에 attach한다.
+ * pane 목록을 받고, daemon이 PTY 출력 히스토리를 replay한다.
+ * @return 0 success, -1 failure.
+ */
+int ipc_client_session_attach(ipc_client_t *c, uint32_t session_id,
+                               ipc_attach_pane_info_t *panes_out, int max_panes,
+                               int *out_count);
 
 /* ── Window ──────────────────────────────────────────────────────────────── */
 

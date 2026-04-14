@@ -828,7 +828,15 @@ static void do_config_reload(void)
 
 int main(int argc, char *argv[])
 {
-    (void)argc; (void)argv;
+    /* CLI 인자 파싱 */
+    const char *remote_target = NULL;
+    const char *attach_name   = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--remote") == 0 && i + 1 < argc)
+            remote_target = argv[++i];
+        else if (strcmp(argv[i], "--attach") == 0 && i + 1 < argc)
+            attach_name = argv[++i];
+    }
 
     termemu_config_t cfg = {0};
     config_defaults(&cfg);
@@ -947,7 +955,15 @@ int main(int argc, char *argv[])
     /* ── IPC connect ─────────────────────────────────────────────────────── */
     g_client = ipc_client_create(on_pty_output, NULL);
     ipc_client_set_pane_exited_cb(g_client, on_pane_exited, NULL);
-    if (ipc_client_connect(g_client) != 0) {
+
+    int connect_ok;
+    if (remote_target) {
+        fprintf(stderr, "[termemu] connecting to %s via SSH...\n", remote_target);
+        connect_ok = ipc_client_connect_remote(g_client, remote_target);
+    } else {
+        connect_ok = ipc_client_connect(g_client);
+    }
+    if (connect_ok != 0) {
         fprintf(stderr, "Failed to connect to daemon\n"); return 1;
     }
 
@@ -956,20 +972,89 @@ int main(int argc, char *argv[])
     int cols = g_win_w / fw; if (cols < 1) cols = 80;
     int rows = g_win_h / fh; if (rows < 1) rows = 24;
 
-    ipc_client_session_create(g_client, "default", &g_session_id);
-    ipc_client_window_create(g_client, g_session_id, "1", &g_window_id);
+    if (attach_name) {
+        /* ── Attach 모드: 기존 세션에 연결 ── */
+        ipc_session_info_t sessions[64];
+        int sess_count = 0;
+        ipc_client_session_list(g_client, sessions, 64, &sess_count);
 
-    uint32_t first_pane = 0;
-    ipc_client_pane_create(g_client, g_session_id, g_window_id,
-                            (uint16_t)cols, (uint16_t)rows, &first_pane);
+        uint32_t target_sid = 0;
+        for (int i = 0; i < sess_count; i++) {
+            if (strcmp(sessions[i].name, attach_name) == 0) {
+                target_sid = sessions[i].session_id;
+                break;
+            }
+        }
+        if (!target_sid) {
+            fprintf(stderr, "Session '%s' not found\n", attach_name);
+            return 1;
+        }
 
-    pane_slot_t *first_slot = pane_slot_alloc(first_pane, cols, rows);
-    if (first_slot) {
-        screen_apply_theme(&first_slot->screen, g_theme);
-        screen_set_clipboard_cb(&first_slot->screen, on_clipboard_set, NULL);
+        ipc_attach_pane_info_t panes[64];
+        int pane_count = 0;
+        if (ipc_client_session_attach(g_client, target_sid,
+                                       panes, 64, &pane_count) != 0) {
+            fprintf(stderr, "Failed to attach to session\n");
+            return 1;
+        }
+
+        g_session_id = target_sid;
+        if (pane_count > 0)
+            g_window_id = panes[0].window_id;
+
+        /* pane_slot 생성 + 레이아웃 (첫 pane은 루트, 나머지는 수평 분할) */
+        for (int i = 0; i < pane_count; i++) {
+            pane_slot_t *ps = pane_slot_alloc(panes[i].pane_id,
+                                               panes[i].cols, panes[i].rows);
+            if (ps) {
+                screen_apply_theme(&ps->screen, g_theme);
+                screen_set_clipboard_cb(&ps->screen, on_clipboard_set, NULL);
+            }
+
+            if (i == 0) {
+                g_active_pane = panes[i].pane_id;
+                g_layout = layout_create_leaf(panes[i].pane_id,
+                                               0, 0, g_win_w, g_win_h);
+            } else if (g_layout) {
+                layout_node_t *cur = layout_find_pane(g_layout, g_active_pane);
+                if (cur) {
+                    layout_split(cur, LAYOUT_SPLIT_H, 0.5f, panes[i].pane_id);
+                    layout_node_t *r = cur;
+                    while (r->parent) r = r->parent;
+                    g_layout = r;
+                }
+            }
+        }
+
+        /* SIGWINCH 트릭: attach 후 resize를 보내 원격 앱이 화면을 다시 그리게 함 */
+        if (g_layout) {
+            layout_resize_root(g_layout, 0, 0, g_win_w, g_win_h);
+            resize_ctx_t rctx = { g_client, g_session_id, g_window_id, fw, fh };
+            layout_each_leaf(g_layout, resize_leaf_cb, &rctx);
+        }
+
+        /* PTY replay 수신 (ipc_client_poll에서 자동 처리) */
+        ipc_client_poll(g_client, 500);
+
+        fprintf(stderr, "[termemu] attached to session '%s' (%d panes)\n",
+                attach_name, pane_count);
+    } else {
+        /* ── 새 세션 생성 모드 ── */
+        ipc_client_session_create(g_client, "default", &g_session_id);
+        ipc_client_window_create(g_client, g_session_id, "1", &g_window_id);
+
+        uint32_t first_pane = 0;
+        ipc_client_pane_create(g_client, g_session_id, g_window_id,
+                                (uint16_t)cols, (uint16_t)rows, &first_pane);
+
+        pane_slot_t *first_slot = pane_slot_alloc(first_pane, cols, rows);
+        if (first_slot) {
+            screen_apply_theme(&first_slot->screen, g_theme);
+            screen_set_clipboard_cb(&first_slot->screen, on_clipboard_set, NULL);
+        }
+        g_active_pane = first_pane;
+        g_layout = layout_create_leaf(first_pane, 0, 0, g_win_w, g_win_h);
     }
-    g_active_pane = first_pane;
-    g_layout = layout_create_leaf(first_pane, 0, 0, g_win_w, g_win_h);
 
     /* ── 설정 핫 리로드 감시 ────────────────────────────────────────────── */
     void *fs_watcher = fs_watch_create();

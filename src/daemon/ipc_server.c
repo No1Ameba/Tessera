@@ -31,11 +31,18 @@ typedef struct {
     size_t  rbuf_len;
 } ipc_client_slot_t;
 
+#define PANE_RING_SIZE  (256 * 1024)  /* PTY 출력 링 버퍼 크기 (attach 시 replay) */
+
 typedef struct {
     int      pty_fd;      /* -1: 빈 슬롯 */
     uint32_t pane_id;
     uint32_t session_id;
     uint32_t window_id;
+
+    /* PTY 출력 링 버퍼 — attach 시 재전송용 */
+    uint8_t  ring[PANE_RING_SIZE];
+    size_t   ring_head;   /* 다음 쓰기 위치 */
+    size_t   ring_count;  /* 저장된 바이트 수 */
 } ipc_pane_slot_t;
 
 struct ipc_server {
@@ -537,6 +544,91 @@ static void handle_pty_input(ipc_server_t *srv, int client_fd,
 
 /* ─── 메시지 디스패처 ────────────────────────────────────────────────────── */
 
+/* ── SESSION_ATTACH ──────────────────────────────────────────────────────── */
+
+static void handle_session_attach(ipc_server_t *srv, int client_fd,
+                                   const uint8_t *payload, uint16_t plen)
+{
+    if (plen < sizeof(ipc_payload_session_attach_t)) {
+        send_error(client_fd, IPC_MSG_SESSION_ATTACH,
+                   IPC_ERR_INVALID_MSG, "payload too small");
+        return;
+    }
+    const ipc_payload_session_attach_t *req =
+        (const ipc_payload_session_attach_t *)payload;
+    session_t *s = session_find_by_id(srv->session_mgr, req->session_id);
+    if (!s) {
+        send_error(client_fd, IPC_MSG_SESSION_ATTACH,
+                   IPC_ERR_SESSION_NOT_FOUND, "session not found");
+        return;
+    }
+
+    /* pane 목록 수집 */
+    ipc_attach_pane_info_t panes[IPC_MAX_PANES];
+    int pane_count = 0;
+    for (window_t *w = s->windows; w && pane_count < IPC_MAX_PANES; w = w->next) {
+        for (pane_t *p = w->panes; p && pane_count < IPC_MAX_PANES; p = p->next) {
+            panes[pane_count].pane_id   = p->id;
+            panes[pane_count].window_id = w->id;
+            panes[pane_count].cols      = p->cols;
+            panes[pane_count].rows      = p->rows;
+            pane_count++;
+        }
+    }
+
+    /* 응답 전송: 헤더 + pane 배열 */
+    ipc_payload_session_attach_r_t resp;
+    memset(&resp, 0, sizeof(resp));
+    resp.session_id = s->id;
+    resp.pane_count = (uint32_t)pane_count;
+    strncpy(resp.session_name, s->name, sizeof(resp.session_name) - 1);
+
+    size_t arr_sz = (size_t)pane_count * sizeof(ipc_attach_pane_info_t);
+    uint16_t total = (uint16_t)(sizeof(resp) + arr_sz);
+    uint8_t buf[sizeof(ipc_msg_header_t) + sizeof(resp) + sizeof(panes)];
+    ipc_msg_header_t hdr = IPC_HEADER_INIT(IPC_MSG_SESSION_ATTACH_R, total);
+    memcpy(buf, &hdr, sizeof(hdr));
+    memcpy(buf + sizeof(hdr), &resp, sizeof(resp));
+    memcpy(buf + sizeof(hdr) + sizeof(resp), panes, arr_sz);
+    write(client_fd, buf, sizeof(hdr) + total);
+
+    /* 각 pane의 링 버퍼를 PTY_OUTPUT으로 재전송 (요청 클라이언트에만) */
+    for (int i = 0; i < pane_count; i++) {
+        ipc_pane_slot_t *ps = NULL;
+        for (int j = 0; j < IPC_MAX_PANES; j++) {
+            if (srv->panes[j].pty_fd >= 0 &&
+                srv->panes[j].pane_id == panes[i].pane_id) {
+                ps = &srv->panes[j];
+                break;
+            }
+        }
+        if (!ps || ps->ring_count == 0) continue;
+
+        /* 링 버퍼 읽기 시작 위치 */
+        size_t start = (ps->ring_head + PANE_RING_SIZE - ps->ring_count) % PANE_RING_SIZE;
+        size_t remaining = ps->ring_count;
+
+        while (remaining > 0) {
+            size_t chunk = remaining > IPC_PTY_CHUNK_MAX ? IPC_PTY_CHUNK_MAX : remaining;
+            uint8_t tmp[IPC_PTY_CHUNK_MAX];
+            for (size_t k = 0; k < chunk; k++)
+                tmp[k] = ps->ring[(start + k) % PANE_RING_SIZE];
+
+            ipc_payload_pty_data_t dh;
+            dh.pane_id  = ps->pane_id;
+            dh.data_len = (uint16_t)chunk;
+            ipc_msg_header_t mh = IPC_HEADER_INIT(IPC_MSG_PTY_OUTPUT,
+                (uint16_t)(sizeof(dh) + chunk));
+            write(client_fd, &mh, sizeof(mh));
+            write(client_fd, &dh, sizeof(dh));
+            write(client_fd, tmp, chunk);
+
+            start = (start + chunk) % PANE_RING_SIZE;
+            remaining -= chunk;
+        }
+    }
+}
+
 static void dispatch_message(ipc_server_t *srv, int client_fd,
                               const ipc_msg_header_t *hdr,
                               const uint8_t *payload) {
@@ -555,6 +647,9 @@ static void dispatch_message(ipc_server_t *srv, int client_fd,
             break;
         case IPC_MSG_SESSION_LIST:
             handle_session_list(srv, client_fd);
+            break;
+        case IPC_MSG_SESSION_ATTACH:
+            handle_session_attach(srv, client_fd, payload, hdr->payload_len);
             break;
         case IPC_MSG_WINDOW_CREATE:
             handle_window_create(srv, client_fd, payload, hdr->payload_len);
@@ -647,6 +742,13 @@ static void pty_output_read(ipc_server_t *srv, int pty_fd) {
         ssize_t n = pty_read(&pty, chunk, sizeof(chunk));
         if (n == 0) break;          /* EAGAIN — 현재 읽을 데이터 없음, 정상 */
         if (n < 0)  { pty_eof = 1; break; }  /* EIO — 셸 종료, 실제 EOF */
+
+        /* 링 버퍼에 기록 (attach 시 replay 용) */
+        for (ssize_t j = 0; j < n; j++) {
+            slot->ring[slot->ring_head] = chunk[j];
+            slot->ring_head = (slot->ring_head + 1) % PANE_RING_SIZE;
+            if (slot->ring_count < PANE_RING_SIZE) slot->ring_count++;
+        }
 
         /* ipc_payload_pty_data_t 헤더 + 데이터 조합 전송 */
         ipc_payload_pty_data_t data_hdr;

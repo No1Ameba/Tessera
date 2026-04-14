@@ -19,7 +19,10 @@
 #define CMD_TIMEOUT_MS 5000
 
 struct ipc_client {
-    int              fd;
+    int              fd;         /* Unix socket fd (양방향) 또는 -1 (pipe 모드) */
+    int              pipe_r;    /* pipe 모드: 읽기 fd (SSH stdout) */
+    int              pipe_w;    /* pipe 모드: 쓰기 fd (SSH stdin) */
+    pid_t            bridge_pid;/* pipe 모드: SSH 자식 PID */
     pty_output_cb_t  cb;
     void            *cb_user;
     pane_exited_cb_t exit_cb;
@@ -36,6 +39,10 @@ static int64_t now_ms(void)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
+
+/* 읽기/쓰기 fd 선택: pipe 모드면 pipe_r/pipe_w, 아니면 fd */
+static int read_fd(const ipc_client_t *c)  { return c->pipe_r >= 0 ? c->pipe_r : c->fd; }
+static int write_fd(const ipc_client_t *c) { return c->pipe_w >= 0 ? c->pipe_w : c->fd; }
 
 /* ── Wire-level send ─────────────────────────────────────────────────────── */
 
@@ -136,11 +143,11 @@ static int recv_until(ipc_client_t *c, ipc_msg_type_t want,
         int remaining_ms = (int)(deadline - now_ms());
         if (remaining_ms <= 0) return -1;
 
-        struct pollfd pfd = { .fd = c->fd, .events = POLLIN };
+        struct pollfd pfd = { .fd = read_fd(c), .events = POLLIN };
         int ret = poll(&pfd, 1, remaining_ms);
         if (ret <= 0) return -1; /* timeout or error */
 
-        ssize_t n = read(c->fd, c->rbuf + c->rbuf_len,
+        ssize_t n = read(read_fd(c), c->rbuf + c->rbuf_len,
                          RECV_BUF_SIZE - c->rbuf_len);
         if (n <= 0) return -1; /* EOF or error */
         c->rbuf_len += (size_t)n;
@@ -211,9 +218,12 @@ ipc_client_t *ipc_client_create(pty_output_cb_t cb, void *user)
 {
     ipc_client_t *c = calloc(1, sizeof *c);
     if (!c) return NULL;
-    c->fd      = -1;
-    c->cb      = cb;
-    c->cb_user = user;
+    c->fd         = -1;
+    c->pipe_r     = -1;
+    c->pipe_w     = -1;
+    c->bridge_pid = -1;
+    c->cb         = cb;
+    c->cb_user    = user;
     return c;
 }
 
@@ -289,7 +299,7 @@ int ipc_client_session_create(ipc_client_t *c, const char *name,
 {
     ipc_payload_session_create_t req = {0};
     strncpy(req.name, name, sizeof req.name - 1);
-    if (send_msg(c->fd, IPC_MSG_SESSION_CREATE, &req, sizeof req) != 0) return -1;
+    if (send_msg(write_fd(c), IPC_MSG_SESSION_CREATE, &req, sizeof req) != 0) return -1;
 
     ipc_payload_session_created_t resp = {0};
     if (recv_until(c, IPC_MSG_SESSION_CREATED, &resp, sizeof resp, CMD_TIMEOUT_MS) < 0)
@@ -301,14 +311,14 @@ int ipc_client_session_create(ipc_client_t *c, const char *name,
 int ipc_client_session_destroy(ipc_client_t *c, uint32_t session_id)
 {
     ipc_payload_session_destroy_t req = { .session_id = session_id };
-    if (send_msg(c->fd, IPC_MSG_SESSION_DESTROY, &req, sizeof req) != 0) return -1;
+    if (send_msg(write_fd(c), IPC_MSG_SESSION_DESTROY, &req, sizeof req) != 0) return -1;
     return recv_until(c, IPC_MSG_OK, NULL, 0, CMD_TIMEOUT_MS) < 0 ? -1 : 0;
 }
 
 int ipc_client_session_list(ipc_client_t *c,
                              ipc_session_info_t *buf, int max, int *out_count)
 {
-    if (send_msg(c->fd, IPC_MSG_SESSION_LIST, NULL, 0) != 0) return -1;
+    if (send_msg(write_fd(c), IPC_MSG_SESSION_LIST, NULL, 0) != 0) return -1;
 
     /* SESSION_LIST_R payload is an array of ipc_session_info_t. */
     uint8_t raw[sizeof(ipc_session_info_t) * 64] = {0};
@@ -334,7 +344,7 @@ int ipc_client_window_create(ipc_client_t *c, uint32_t session_id,
 {
     ipc_payload_window_create_t req = { .session_id = session_id };
     strncpy(req.name, name, sizeof req.name - 1);
-    if (send_msg(c->fd, IPC_MSG_WINDOW_CREATE, &req, sizeof req) != 0) return -1;
+    if (send_msg(write_fd(c), IPC_MSG_WINDOW_CREATE, &req, sizeof req) != 0) return -1;
 
     ipc_payload_window_created_t resp = {0};
     if (recv_until(c, IPC_MSG_WINDOW_CREATED, &resp, sizeof resp, CMD_TIMEOUT_MS) < 0)
@@ -347,7 +357,7 @@ int ipc_client_window_destroy(ipc_client_t *c, uint32_t session_id,
                                uint32_t window_id)
 {
     ipc_payload_window_ref_t req = { .session_id = session_id, .window_id = window_id };
-    if (send_msg(c->fd, IPC_MSG_WINDOW_DESTROY, &req, sizeof req) != 0) return -1;
+    if (send_msg(write_fd(c), IPC_MSG_WINDOW_DESTROY, &req, sizeof req) != 0) return -1;
     return recv_until(c, IPC_MSG_OK, NULL, 0, CMD_TIMEOUT_MS) < 0 ? -1 : 0;
 }
 
@@ -355,7 +365,7 @@ int ipc_client_window_focus(ipc_client_t *c, uint32_t session_id,
                              uint32_t window_id)
 {
     ipc_payload_window_ref_t req = { .session_id = session_id, .window_id = window_id };
-    if (send_msg(c->fd, IPC_MSG_WINDOW_FOCUS, &req, sizeof req) != 0) return -1;
+    if (send_msg(write_fd(c), IPC_MSG_WINDOW_FOCUS, &req, sizeof req) != 0) return -1;
     return recv_until(c, IPC_MSG_OK, NULL, 0, CMD_TIMEOUT_MS) < 0 ? -1 : 0;
 }
 
@@ -369,7 +379,7 @@ int ipc_client_pane_create(ipc_client_t *c, uint32_t session_id,
         .session_id = session_id, .window_id = window_id,
         .cols = cols, .rows = rows,
     };
-    if (send_msg(c->fd, IPC_MSG_PANE_CREATE, &req, sizeof req) != 0) return -1;
+    if (send_msg(write_fd(c), IPC_MSG_PANE_CREATE, &req, sizeof req) != 0) return -1;
 
     ipc_payload_pane_created_t resp = {0};
     if (recv_until(c, IPC_MSG_PANE_CREATED, &resp, sizeof resp, CMD_TIMEOUT_MS) < 0)
@@ -384,7 +394,7 @@ int ipc_client_pane_destroy(ipc_client_t *c, uint32_t session_id,
     ipc_payload_pane_ref_t req = {
         .session_id = session_id, .window_id = window_id, .pane_id = pane_id,
     };
-    if (send_msg(c->fd, IPC_MSG_PANE_DESTROY, &req, sizeof req) != 0) return -1;
+    if (send_msg(write_fd(c), IPC_MSG_PANE_DESTROY, &req, sizeof req) != 0) return -1;
     return recv_until(c, IPC_MSG_OK, NULL, 0, CMD_TIMEOUT_MS) < 0 ? -1 : 0;
 }
 
@@ -396,7 +406,7 @@ int ipc_client_pane_resize(ipc_client_t *c, uint32_t session_id,
         .session_id = session_id, .window_id = window_id, .pane_id = pane_id,
         .cols = cols, .rows = rows,
     };
-    if (send_msg(c->fd, IPC_MSG_PANE_RESIZE, &req, sizeof req) != 0) return -1;
+    if (send_msg(write_fd(c), IPC_MSG_PANE_RESIZE, &req, sizeof req) != 0) return -1;
     return recv_until(c, IPC_MSG_OK, NULL, 0, CMD_TIMEOUT_MS) < 0 ? -1 : 0;
 }
 
@@ -406,7 +416,7 @@ int ipc_client_pane_focus(ipc_client_t *c, uint32_t session_id,
     ipc_payload_pane_ref_t req = {
         .session_id = session_id, .window_id = window_id, .pane_id = pane_id,
     };
-    if (send_msg(c->fd, IPC_MSG_PANE_FOCUS, &req, sizeof req) != 0) return -1;
+    if (send_msg(write_fd(c), IPC_MSG_PANE_FOCUS, &req, sizeof req) != 0) return -1;
     return recv_until(c, IPC_MSG_OK, NULL, 0, CMD_TIMEOUT_MS) < 0 ? -1 : 0;
 }
 
@@ -436,7 +446,7 @@ int ipc_client_pty_input(ipc_client_t *c, uint32_t pane_id,
     ssize_t sent = 0;
     ssize_t tot  = (ssize_t)total;
     while (sent < tot) {
-        ssize_t n = write(c->fd, buf + sent, (size_t)(tot - sent));
+        ssize_t n = write(write_fd(c), buf + sent, (size_t)(tot - sent));
         if (n < 0) { if (errno == EINTR) continue; return -1; }
         sent += n;
     }
@@ -447,13 +457,13 @@ int ipc_client_poll(ipc_client_t *c, int timeout_ms)
 {
     if (!c || c->fd < 0) return -1;
 
-    struct pollfd pfd = { .fd = c->fd, .events = POLLIN };
+    struct pollfd pfd = { .fd = read_fd(c), .events = POLLIN };
     int ret = poll(&pfd, 1, timeout_ms);
     if (ret < 0) return -1;
     if (ret == 0) return 0;
 
     /* Read available data. */
-    ssize_t n = read(c->fd, c->rbuf + c->rbuf_len,
+    ssize_t n = read(read_fd(c), c->rbuf + c->rbuf_len,
                      RECV_BUF_SIZE - c->rbuf_len);
     if (n <= 0) return -1;
     c->rbuf_len += (size_t)n;
@@ -466,4 +476,88 @@ int ipc_client_poll(ipc_client_t *c, int timeout_ms)
         count++;
     }
     return count;
+}
+
+/* ── 원격 연결 (SSH 파이프 트랜스포트) ───────────────────────────────────── */
+
+int ipc_client_connect_remote(ipc_client_t *c, const char *ssh_target)
+{
+    if (!c || !ssh_target) return -1;
+
+    int to_child[2], from_child[2];
+    if (pipe(to_child) < 0 || pipe(from_child) < 0) return -1;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(to_child[0]); close(to_child[1]);
+        close(from_child[0]); close(from_child[1]);
+        return -1;
+    }
+
+    if (pid == 0) {
+        /* 자식: SSH 실행 */
+        close(to_child[1]);
+        close(from_child[0]);
+        dup2(to_child[0], STDIN_FILENO);
+        dup2(from_child[1], STDOUT_FILENO);
+        close(to_child[0]);
+        close(from_child[1]);
+        execlp("ssh", "ssh", "-T", ssh_target, "termemu-bridge", (char *)NULL);
+        _exit(1);
+    }
+
+    /* 부모 */
+    close(to_child[0]);
+    close(from_child[1]);
+    c->pipe_w = to_child[1];
+    c->pipe_r = from_child[0];
+    c->bridge_pid = pid;
+    c->fd = -1;
+
+    /* SSH 연결 대기 후 HELLO 핸드셰이크 */
+    ipc_payload_hello_t hello;
+    memset(&hello, 0, sizeof hello);
+    hello.client_pid = (uint32_t)getpid();
+    strncpy(hello.client_version, "0.1.0", sizeof(hello.client_version) - 1);
+
+    if (send_msg(write_fd(c), IPC_MSG_HELLO, &hello, sizeof hello) != 0)
+        return -1;
+
+    uint8_t ack_buf[256];
+    if (recv_until(c, IPC_MSG_HELLO_ACK, ack_buf, sizeof ack_buf,
+                    10000) != 0)  /* SSH는 느릴 수 있으므로 10초 타임아웃 */
+        return -1;
+
+    return 0;
+}
+
+/* ── 세션 attach ─────────────────────────────────────────────────────────── */
+
+int ipc_client_session_attach(ipc_client_t *c, uint32_t session_id,
+                               ipc_attach_pane_info_t *panes_out, int max_panes,
+                               int *out_count)
+{
+    if (!c || !panes_out || !out_count) return -1;
+
+    ipc_payload_session_attach_t req = { .session_id = session_id };
+    if (send_msg(write_fd(c), IPC_MSG_SESSION_ATTACH, &req, sizeof req) != 0)
+        return -1;
+
+    uint8_t buf[IPC_MAX_PAYLOAD_LEN];
+    if (recv_until(c, IPC_MSG_SESSION_ATTACH_R, buf, sizeof buf,
+                    CMD_TIMEOUT_MS) != 0)
+        return -1;
+
+    const ipc_payload_session_attach_r_t *resp =
+        (const ipc_payload_session_attach_r_t *)buf;
+    int cnt = (int)resp->pane_count;
+    if (cnt > max_panes) cnt = max_panes;
+
+    const ipc_attach_pane_info_t *arr =
+        (const ipc_attach_pane_info_t *)(buf + sizeof(*resp));
+    for (int i = 0; i < cnt; i++)
+        panes_out[i] = arr[i];
+
+    *out_count = cnt;
+    return 0;
 }

@@ -39,6 +39,8 @@ typedef enum {
     IPC_MSG_SESSION_DESTROY = 0x12,  /* C→D  세션 삭제 요청 */
     IPC_MSG_SESSION_LIST    = 0x13,  /* C→D  세션 목록 요청 */
     IPC_MSG_SESSION_LIST_R  = 0x14,  /* D→C  세션 목록 응답 */
+    IPC_MSG_SESSION_ATTACH  = 0x15,  /* C→D  기존 세션 attach 요청 */
+    IPC_MSG_SESSION_ATTACH_R = 0x16, /* D→C  세션 트리 (페인 목록) 응답 */
 
     /* ── 윈도우 ─────────────────────────── */
     IPC_MSG_WINDOW_CREATE   = 0x20,  /* C→D  윈도우 생성 요청 */
@@ -180,6 +182,26 @@ typedef struct {
 } ipc_payload_pty_data_t;
 
 /* IPC_MSG_PTY_OUTPUT  D→C — 동일 구조 재사용 */
+
+/* IPC_MSG_SESSION_ATTACH  C→D */
+typedef struct {
+    uint32_t session_id;
+} ipc_payload_session_attach_t;
+
+/* IPC_MSG_SESSION_ATTACH_R  D→C
+ * 페이로드: 이 헤더 + ipc_attach_pane_info_t[pane_count] 배열 */
+typedef struct {
+    uint32_t session_id;
+    uint32_t pane_count;
+    char     session_name[64];
+} ipc_payload_session_attach_r_t;
+
+typedef struct {
+    uint32_t pane_id;
+    uint32_t window_id;
+    uint16_t cols;
+    uint16_t rows;
+} ipc_attach_pane_info_t;
 
 /* IPC_MSG_SCREEN_DAMAGE  D→C */
 typedef struct {
