@@ -170,6 +170,12 @@ struct nk_context *nk_impl_init(GLFWwindow *win,
     if (font)
         nk_style_set_font(&nk_gl.ctx, &font->handle);
 
+    /* 버튼 클릭 영역을 넉넉히 — hit testing 오차 완화 */
+    nk_gl.ctx.style.button.padding = nk_vec2(6, 6);
+    nk_gl.ctx.style.button.border  = 1.0f;
+    nk_gl.ctx.style.window.padding = nk_vec2(8, 8);
+    nk_gl.ctx.style.window.spacing = nk_vec2(6, 6);
+
     return &nk_gl.ctx;
 }
 
@@ -180,12 +186,18 @@ void nk_impl_new_frame(void)
     glfwGetWindowSize(nk_gl.win, &w, &h);
     glfwGetFramebufferSize(nk_gl.win, &display_w, &display_h);
 
+    /* Window↔Framebuffer 좌표 변환 스케일 (HiDPI 대응) */
+    double sx = (w > 0)  ? (double)display_w / (double)w  : 1.0;
+    double sy = (h > 0)  ? (double)display_h / (double)h  : 1.0;
+
     nk_input_begin(&nk_gl.ctx);
 
-    /* Mouse position */
+    /* Mouse position (Window 좌표 → Framebuffer 좌표로 스케일) */
     double mx, my;
     glfwGetCursorPos(nk_gl.win, &mx, &my);
-    nk_input_motion(&nk_gl.ctx, (int)mx, (int)my);
+    int fmx = (int)(mx * sx);
+    int fmy = (int)(my * sy);
+    nk_input_motion(&nk_gl.ctx, fmx, fmy);
 
     /* Mouse buttons — 콜백에서 버퍼된 상태 사용, 없으면 폴링 */
     {
@@ -195,9 +207,9 @@ void nk_impl_new_frame(void)
                   : (glfwGetMouseButton(nk_gl.win, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS);
         int right = (nk_gl.mouse_btn[2] >= 0) ? nk_gl.mouse_btn[2]
                   : (glfwGetMouseButton(nk_gl.win, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS);
-        nk_input_button(&nk_gl.ctx, NK_BUTTON_LEFT,   (int)mx, (int)my, left);
-        nk_input_button(&nk_gl.ctx, NK_BUTTON_MIDDLE, (int)mx, (int)my, mid);
-        nk_input_button(&nk_gl.ctx, NK_BUTTON_RIGHT,  (int)mx, (int)my, right);
+        nk_input_button(&nk_gl.ctx, NK_BUTTON_LEFT,   fmx, fmy, left);
+        nk_input_button(&nk_gl.ctx, NK_BUTTON_MIDDLE, fmx, fmy, mid);
+        nk_input_button(&nk_gl.ctx, NK_BUTTON_RIGHT,  fmx, fmy, right);
         nk_gl.mouse_btn[0] = nk_gl.mouse_btn[1] = nk_gl.mouse_btn[2] = -1;
     }
 
