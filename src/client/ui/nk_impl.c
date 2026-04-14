@@ -45,6 +45,14 @@ static struct {
     float  scroll_x, scroll_y;  /* 콜백에서 누적, new_frame에서 소비 */
     int    mouse_btn[3];        /* 콜백에서 기록: -1=미변경, 0=released, 1=pressed */
     int    is_active; /* nk_window is being interacted with */
+
+    /* 텍스트 입력 버퍼 (char_callback에서 누적, new_frame에서 flush) */
+    unsigned int text_buf[64];
+    int          text_len;
+
+    /* 키 입력 버퍼 */
+    struct { int key; int down; } key_buf[32];
+    int key_buf_len;
 } nk_gl;
 
 /* ── Shaders ────────────────────────────────────────────────────────────── */
@@ -200,6 +208,28 @@ void nk_impl_new_frame(void)
         nk_gl.scroll_y = 0.0f;
     }
 
+    /* 키 입력 flush */
+    for (int i = 0; i < nk_gl.key_buf_len; i++) {
+        int k = nk_gl.key_buf[i].key;
+        int down = nk_gl.key_buf[i].down;
+        switch (k) {
+        case GLFW_KEY_BACKSPACE: nk_input_key(&nk_gl.ctx, NK_KEY_BACKSPACE, down); break;
+        case GLFW_KEY_DELETE:    nk_input_key(&nk_gl.ctx, NK_KEY_DEL, down); break;
+        case GLFW_KEY_ENTER:     nk_input_key(&nk_gl.ctx, NK_KEY_ENTER, down); break;
+        case GLFW_KEY_TAB:       nk_input_key(&nk_gl.ctx, NK_KEY_TAB, down); break;
+        case GLFW_KEY_LEFT:      nk_input_key(&nk_gl.ctx, NK_KEY_LEFT, down); break;
+        case GLFW_KEY_RIGHT:     nk_input_key(&nk_gl.ctx, NK_KEY_RIGHT, down); break;
+        case GLFW_KEY_UP:        nk_input_key(&nk_gl.ctx, NK_KEY_UP, down); break;
+        case GLFW_KEY_DOWN:      nk_input_key(&nk_gl.ctx, NK_KEY_DOWN, down); break;
+        }
+    }
+    nk_gl.key_buf_len = 0;
+
+    /* 텍스트 입력 flush */
+    for (int i = 0; i < nk_gl.text_len; i++)
+        nk_input_unicode(&nk_gl.ctx, nk_gl.text_buf[i]);
+    nk_gl.text_len = 0;
+
     nk_input_end(&nk_gl.ctx);
 
     nk_gl.is_active = nk_window_is_any_hovered(&nk_gl.ctx);
@@ -328,27 +358,18 @@ void nk_impl_render(void)
 int nk_impl_handle_key(int key, int scancode, int action, int mods)
 {
     (void)scancode; (void)mods;
-
-    int down = (action != GLFW_RELEASE);
-    struct nk_context *ctx = &nk_gl.ctx;
-
-    switch (key) {
-    case GLFW_KEY_BACKSPACE:  nk_input_key(ctx, NK_KEY_BACKSPACE, down); return 1;
-    case GLFW_KEY_DELETE:     nk_input_key(ctx, NK_KEY_DEL, down); return 1;
-    case GLFW_KEY_ENTER:      nk_input_key(ctx, NK_KEY_ENTER, down); return 1;
-    case GLFW_KEY_TAB:        nk_input_key(ctx, NK_KEY_TAB, down); return 1;
-    case GLFW_KEY_LEFT:       nk_input_key(ctx, NK_KEY_LEFT, down); return 1;
-    case GLFW_KEY_RIGHT:      nk_input_key(ctx, NK_KEY_RIGHT, down); return 1;
-    case GLFW_KEY_UP:         nk_input_key(ctx, NK_KEY_UP, down); return 1;
-    case GLFW_KEY_DOWN:       nk_input_key(ctx, NK_KEY_DOWN, down); return 1;
-    default: break;
+    if (nk_gl.key_buf_len < (int)(sizeof(nk_gl.key_buf)/sizeof(nk_gl.key_buf[0]))) {
+        nk_gl.key_buf[nk_gl.key_buf_len].key  = key;
+        nk_gl.key_buf[nk_gl.key_buf_len].down = (action != GLFW_RELEASE);
+        nk_gl.key_buf_len++;
     }
-    return 0;
+    return 1;
 }
 
 int nk_impl_handle_char(unsigned int codepoint)
 {
-    nk_input_unicode(&nk_gl.ctx, codepoint);
+    if (nk_gl.text_len < (int)(sizeof(nk_gl.text_buf)/sizeof(nk_gl.text_buf[0])))
+        nk_gl.text_buf[nk_gl.text_len++] = codepoint;
     return 1;
 }
 
