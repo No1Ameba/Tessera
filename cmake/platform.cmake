@@ -1,0 +1,15 @@
+# 플랫폼 감지 및 전역 정의
+if(WIN32)
+    set(TERMEMU_PLATFORM "windows")
+    add_compile_definitions(TERMEMU_PLATFORM_WINDOWS)
+elseif(APPLE)
+    set(TERMEMU_PLATFORM "macos")
+    add_compile_definitions(TERMEMU_PLATFORM_MACOS TERMEMU_PLATFORM_POSIX)
+elseif(UNIX)
+    set(TERMEMU_PLATFORM "linux")
+    add_compile_definitions(TERMEMU_PLATFORM_LINUX TERMEMU_PLATFORM_POSIX)
+else()
+    message(FATAL_ERROR "Unsupported platform")
+endif()
+
+message(STATUS "Building for platform: ${TERMEMU_PLATFORM}")

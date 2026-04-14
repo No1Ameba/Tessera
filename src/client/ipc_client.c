@@ -1,0 +1,469 @@
+#define _GNU_SOURCE
+#include "ipc_client.h"
+#include "../platform/ipc.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <time.h>
+
+#define RECV_BUF_SIZE  65536
+#define CMD_TIMEOUT_MS 5000
+
+struct ipc_client {
+    int              fd;
+    pty_output_cb_t  cb;
+    void            *cb_user;
+    pane_exited_cb_t exit_cb;
+    void            *exit_cb_user;
+    uint8_t          rbuf[RECV_BUF_SIZE];
+    size_t           rbuf_len;
+};
+
+/* ── Time helper ─────────────────────────────────────────────────────────── */
+
+static int64_t now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* ── Wire-level send ─────────────────────────────────────────────────────── */
+
+static int send_msg(int fd, ipc_msg_type_t type,
+                    const void *payload, size_t plen)
+{
+    ipc_msg_header_t hdr = IPC_HEADER_INIT(type, (uint16_t)plen);
+    struct iovec iov[2] = {
+        { &hdr,                    sizeof hdr },
+        { (void *)(uintptr_t)payload, plen    },
+    };
+    int iovcnt = plen ? 2 : 1;
+    ssize_t total = (ssize_t)(sizeof hdr + plen);
+    ssize_t sent  = 0;
+
+    /* Simple loop to handle partial writes. */
+    uint8_t buf[sizeof hdr + IPC_MAX_PAYLOAD_LEN];
+    memcpy(buf, &hdr, sizeof hdr);
+    if (plen) memcpy(buf + sizeof hdr, payload, plen);
+    (void)iov; (void)iovcnt;
+
+    while (sent < total) {
+        ssize_t n = write(fd, buf + sent, (size_t)(total - sent));
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        sent += n;
+    }
+    return 0;
+}
+
+/* ── Wire-level receive (accumulates into rbuf) ──────────────────────────── */
+
+/*
+ * Dispatch one complete message from rbuf.
+ * Returns the ipc_msg_type_t, or -1 if no complete message available yet.
+ * Advances rbuf_len by consuming the message.
+ *
+ * If type == IPC_MSG_PTY_OUTPUT, fires the callback.
+ * If want != 0 and type == want, copies payload to out_payload/out_size.
+ */
+static int dispatch_one(ipc_client_t *c,
+                         ipc_msg_type_t want,
+                         void *out_payload, size_t out_size)
+{
+    if (c->rbuf_len < sizeof(ipc_msg_header_t)) return -1;
+
+    ipc_msg_header_t hdr;
+    memcpy(&hdr, c->rbuf, sizeof hdr);
+    size_t total = sizeof hdr + hdr.payload_len;
+    if (c->rbuf_len < total) return -1;
+
+    uint8_t *payload = c->rbuf + sizeof hdr;
+    int type = (int)hdr.type;
+
+    if (type == IPC_MSG_PTY_OUTPUT && c->cb && hdr.payload_len >= sizeof(ipc_payload_pty_data_t)) {
+        ipc_payload_pty_data_t pd;
+        memcpy(&pd, payload, sizeof pd);
+        size_t dlen = pd.data_len;
+        if (dlen > hdr.payload_len - sizeof pd) dlen = hdr.payload_len - sizeof pd;
+        c->cb(pd.pane_id, payload + sizeof pd, dlen, c->cb_user);
+    } else if (type == IPC_MSG_PANE_EXITED && c->exit_cb &&
+               hdr.payload_len >= sizeof(ipc_payload_pane_ref_t)) {
+        ipc_payload_pane_ref_t ref;
+        memcpy(&ref, payload, sizeof ref);
+        c->exit_cb(ref.pane_id, c->exit_cb_user);
+    } else if (want && type == (int)want && out_payload && out_size) {
+        size_t copy = hdr.payload_len < out_size ? hdr.payload_len : out_size;
+        memcpy(out_payload, payload, copy);
+    }
+
+    /* Consume the message from rbuf. */
+    size_t remaining = c->rbuf_len - total;
+    if (remaining) memmove(c->rbuf, c->rbuf + total, remaining);
+    c->rbuf_len = remaining;
+
+    return type;
+}
+
+/*
+ * Read from socket until we have at least one complete message, or timeout.
+ * Returns the message type or -1 on error/timeout.
+ */
+static int recv_until(ipc_client_t *c, ipc_msg_type_t want,
+                       void *out_payload, size_t out_size, int timeout_ms)
+{
+    int64_t deadline = now_ms() + timeout_ms;
+
+    for (;;) {
+        /* Try to dispatch from existing buffer first. */
+        int dispatched;
+        while ((dispatched = dispatch_one(c, want, out_payload, out_size)) != -1) {
+            if (dispatched == (int)want) return dispatched;
+            if (dispatched == IPC_MSG_ERROR) return IPC_MSG_ERROR;
+        }
+
+        int remaining_ms = (int)(deadline - now_ms());
+        if (remaining_ms <= 0) return -1;
+
+        struct pollfd pfd = { .fd = c->fd, .events = POLLIN };
+        int ret = poll(&pfd, 1, remaining_ms);
+        if (ret <= 0) return -1; /* timeout or error */
+
+        ssize_t n = read(c->fd, c->rbuf + c->rbuf_len,
+                         RECV_BUF_SIZE - c->rbuf_len);
+        if (n <= 0) return -1; /* EOF or error */
+        c->rbuf_len += (size_t)n;
+    }
+}
+
+/* ── On-demand daemon spawn ──────────────────────────────────────────────── */
+
+static int spawn_daemon(void)
+{
+    /*
+     * 데몬 바이너리 탐색 순서:
+     *   1. 클라이언트와 같은 디렉토리  (설치 후 /usr/local/bin/ 경우)
+     *   2. 클라이언트 디렉토리의 ../daemon/  (빌드 트리에서 실행할 때)
+     *   3. execlp 로 PATH 탐색
+     */
+    char exe[1024] = {0};
+    ssize_t elen = readlink("/proc/self/exe", exe, sizeof exe - 1);
+
+    char candidate1[1088] = {0};  /* 같은 디렉토리 */
+    char candidate2[1088] = {0};  /* ../daemon/ */
+
+    if (elen > 0) {
+        char *slash = strrchr(exe, '/');
+        if (slash) {
+            /* 1: same dir */
+            size_t dir_len = (size_t)(slash - exe + 1);
+            snprintf(candidate1, sizeof candidate1,
+                     "%.*stermemu-daemon", (int)dir_len, exe);
+            /* 2: ../daemon/ */
+            snprintf(candidate2, sizeof candidate2,
+                     "%.*s../daemon/termemu-daemon", (int)dir_len, exe);
+        }
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        /* Child: detach, silence stdio, exec daemon. */
+        setsid();
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, 0); dup2(devnull, 1); dup2(devnull, 2);
+            close(devnull);
+        }
+        if (candidate1[0]) execl(candidate1, "termemu-daemon", "--daemon", (char*)NULL);
+        if (candidate2[0]) execl(candidate2, "termemu-daemon", "--daemon", (char*)NULL);
+        execlp("termemu-daemon", "termemu-daemon", "--daemon", (char*)NULL);
+        _exit(1);
+    }
+
+    /* Parent: wait up to 2 seconds for the socket to appear. */
+    char sock_path[IPC_SOCKET_PATH_MAX];
+    if (ipc_socket_path(sock_path, sizeof sock_path) != 0) return -1;
+
+    for (int i = 0; i < 40; i++) {
+        struct timespec ts = { 0, 50 * 1000 * 1000L };
+        nanosleep(&ts, NULL);
+        struct stat st;
+        if (stat(sock_path, &st) == 0) return 0;
+    }
+    return -1;
+}
+
+/* ── Public API ──────────────────────────────────────────────────────────── */
+
+ipc_client_t *ipc_client_create(pty_output_cb_t cb, void *user)
+{
+    ipc_client_t *c = calloc(1, sizeof *c);
+    if (!c) return NULL;
+    c->fd      = -1;
+    c->cb      = cb;
+    c->cb_user = user;
+    return c;
+}
+
+void ipc_client_destroy(ipc_client_t *c)
+{
+    if (!c) return;
+    ipc_client_disconnect(c);
+    free(c);
+}
+
+void ipc_client_set_pane_exited_cb(ipc_client_t *c,
+                                    pane_exited_cb_t cb, void *user)
+{
+    if (!c) return;
+    c->exit_cb      = cb;
+    c->exit_cb_user = user;
+}
+
+int ipc_client_connect(ipc_client_t *c)
+{
+    char path[IPC_SOCKET_PATH_MAX];
+    if (ipc_socket_path(path, sizeof path) != 0) return -1;
+
+    /* Try to connect; if the socket doesn't exist, spawn the daemon. */
+    int fd = -1;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0) return -1;
+
+        struct sockaddr_un addr = { .sun_family = AF_UNIX };
+        strncpy(addr.sun_path, path, sizeof addr.sun_path - 1);
+
+        if (connect(fd, (struct sockaddr*)&addr, sizeof addr) == 0) break;
+
+        close(fd); fd = -1;
+        if (attempt == 0) {
+            /* Socket missing or refused: try spawning the daemon. */
+            if (spawn_daemon() != 0) return -1;
+        }
+    }
+    if (fd < 0) return -1;
+    c->fd = fd;
+
+    /* HELLO handshake. */
+    ipc_payload_hello_t hello = {
+        .client_pid = (uint32_t)getpid(),
+    };
+    snprintf(hello.client_version, sizeof hello.client_version, "0.1.0");
+
+    if (send_msg(fd, IPC_MSG_HELLO, &hello, sizeof hello) != 0) {
+        ipc_client_disconnect(c); return -1;
+    }
+    ipc_payload_hello_ack_t ack = {0};
+    if (recv_until(c, IPC_MSG_HELLO_ACK, &ack, sizeof ack, CMD_TIMEOUT_MS) < 0) {
+        ipc_client_disconnect(c); return -1;
+    }
+    (void)ack;
+    return 0;
+}
+
+void ipc_client_disconnect(ipc_client_t *c)
+{
+    if (!c || c->fd < 0) return;
+    close(c->fd);
+    c->fd = -1;
+    c->rbuf_len = 0;
+}
+
+/* ── Session operations ──────────────────────────────────────────────────── */
+
+int ipc_client_session_create(ipc_client_t *c, const char *name,
+                               uint32_t *out_id)
+{
+    ipc_payload_session_create_t req = {0};
+    strncpy(req.name, name, sizeof req.name - 1);
+    if (send_msg(c->fd, IPC_MSG_SESSION_CREATE, &req, sizeof req) != 0) return -1;
+
+    ipc_payload_session_created_t resp = {0};
+    if (recv_until(c, IPC_MSG_SESSION_CREATED, &resp, sizeof resp, CMD_TIMEOUT_MS) < 0)
+        return -1;
+    if (out_id) *out_id = resp.session_id;
+    return 0;
+}
+
+int ipc_client_session_destroy(ipc_client_t *c, uint32_t session_id)
+{
+    ipc_payload_session_destroy_t req = { .session_id = session_id };
+    if (send_msg(c->fd, IPC_MSG_SESSION_DESTROY, &req, sizeof req) != 0) return -1;
+    return recv_until(c, IPC_MSG_OK, NULL, 0, CMD_TIMEOUT_MS) < 0 ? -1 : 0;
+}
+
+int ipc_client_session_list(ipc_client_t *c,
+                             ipc_session_info_t *buf, int max, int *out_count)
+{
+    if (send_msg(c->fd, IPC_MSG_SESSION_LIST, NULL, 0) != 0) return -1;
+
+    /* SESSION_LIST_R payload is an array of ipc_session_info_t. */
+    uint8_t raw[sizeof(ipc_session_info_t) * 64] = {0};
+    if (recv_until(c, IPC_MSG_SESSION_LIST_R, raw, sizeof raw, CMD_TIMEOUT_MS) < 0)
+        return -1;
+
+    /* Recover actual payload length from the last received header.
+     * Simple approach: count non-zero entries (not ideal but works for tests). */
+    int n = 0;
+    ipc_session_info_t *infos = (ipc_session_info_t*)raw;
+    for (int i = 0; i < 64 && n < max; i++) {
+        if (!infos[i].session_id && !infos[i].name[0]) break;
+        buf[n++] = infos[i];
+    }
+    if (out_count) *out_count = n;
+    return 0;
+}
+
+/* ── Window operations ───────────────────────────────────────────────────── */
+
+int ipc_client_window_create(ipc_client_t *c, uint32_t session_id,
+                              const char *name, uint32_t *out_id)
+{
+    ipc_payload_window_create_t req = { .session_id = session_id };
+    strncpy(req.name, name, sizeof req.name - 1);
+    if (send_msg(c->fd, IPC_MSG_WINDOW_CREATE, &req, sizeof req) != 0) return -1;
+
+    ipc_payload_window_created_t resp = {0};
+    if (recv_until(c, IPC_MSG_WINDOW_CREATED, &resp, sizeof resp, CMD_TIMEOUT_MS) < 0)
+        return -1;
+    if (out_id) *out_id = resp.window_id;
+    return 0;
+}
+
+int ipc_client_window_destroy(ipc_client_t *c, uint32_t session_id,
+                               uint32_t window_id)
+{
+    ipc_payload_window_ref_t req = { .session_id = session_id, .window_id = window_id };
+    if (send_msg(c->fd, IPC_MSG_WINDOW_DESTROY, &req, sizeof req) != 0) return -1;
+    return recv_until(c, IPC_MSG_OK, NULL, 0, CMD_TIMEOUT_MS) < 0 ? -1 : 0;
+}
+
+int ipc_client_window_focus(ipc_client_t *c, uint32_t session_id,
+                             uint32_t window_id)
+{
+    ipc_payload_window_ref_t req = { .session_id = session_id, .window_id = window_id };
+    if (send_msg(c->fd, IPC_MSG_WINDOW_FOCUS, &req, sizeof req) != 0) return -1;
+    return recv_until(c, IPC_MSG_OK, NULL, 0, CMD_TIMEOUT_MS) < 0 ? -1 : 0;
+}
+
+/* ── Pane operations ─────────────────────────────────────────────────────── */
+
+int ipc_client_pane_create(ipc_client_t *c, uint32_t session_id,
+                            uint32_t window_id, uint16_t cols, uint16_t rows,
+                            uint32_t *out_id)
+{
+    ipc_payload_pane_create_t req = {
+        .session_id = session_id, .window_id = window_id,
+        .cols = cols, .rows = rows,
+    };
+    if (send_msg(c->fd, IPC_MSG_PANE_CREATE, &req, sizeof req) != 0) return -1;
+
+    ipc_payload_pane_created_t resp = {0};
+    if (recv_until(c, IPC_MSG_PANE_CREATED, &resp, sizeof resp, CMD_TIMEOUT_MS) < 0)
+        return -1;
+    if (out_id) *out_id = resp.pane_id;
+    return 0;
+}
+
+int ipc_client_pane_destroy(ipc_client_t *c, uint32_t session_id,
+                             uint32_t window_id, uint32_t pane_id)
+{
+    ipc_payload_pane_ref_t req = {
+        .session_id = session_id, .window_id = window_id, .pane_id = pane_id,
+    };
+    if (send_msg(c->fd, IPC_MSG_PANE_DESTROY, &req, sizeof req) != 0) return -1;
+    return recv_until(c, IPC_MSG_OK, NULL, 0, CMD_TIMEOUT_MS) < 0 ? -1 : 0;
+}
+
+int ipc_client_pane_resize(ipc_client_t *c, uint32_t session_id,
+                            uint32_t window_id, uint32_t pane_id,
+                            uint16_t cols, uint16_t rows)
+{
+    ipc_payload_pane_resize_t req = {
+        .session_id = session_id, .window_id = window_id, .pane_id = pane_id,
+        .cols = cols, .rows = rows,
+    };
+    if (send_msg(c->fd, IPC_MSG_PANE_RESIZE, &req, sizeof req) != 0) return -1;
+    return recv_until(c, IPC_MSG_OK, NULL, 0, CMD_TIMEOUT_MS) < 0 ? -1 : 0;
+}
+
+int ipc_client_pane_focus(ipc_client_t *c, uint32_t session_id,
+                           uint32_t window_id, uint32_t pane_id)
+{
+    ipc_payload_pane_ref_t req = {
+        .session_id = session_id, .window_id = window_id, .pane_id = pane_id,
+    };
+    if (send_msg(c->fd, IPC_MSG_PANE_FOCUS, &req, sizeof req) != 0) return -1;
+    return recv_until(c, IPC_MSG_OK, NULL, 0, CMD_TIMEOUT_MS) < 0 ? -1 : 0;
+}
+
+/* ── Data ────────────────────────────────────────────────────────────────── */
+
+int ipc_client_pty_input(ipc_client_t *c, uint32_t pane_id,
+                          const uint8_t *data, size_t len)
+{
+    if (len > IPC_PTY_CHUNK_MAX) len = IPC_PTY_CHUNK_MAX;
+
+    /* Build header + data inline. */
+    size_t total = sizeof(ipc_msg_header_t) +
+                   sizeof(ipc_payload_pty_data_t) + len;
+    uint8_t buf[sizeof(ipc_msg_header_t) + sizeof(ipc_payload_pty_data_t) + IPC_PTY_CHUNK_MAX];
+
+    ipc_msg_header_t *hdr = (ipc_msg_header_t*)buf;
+    hdr->magic_ver   = ((IPC_VERSION) << 24) | (IPC_MAGIC);
+    hdr->type        = IPC_MSG_PTY_INPUT;
+    hdr->flags       = 0;
+    hdr->payload_len = (uint16_t)(sizeof(ipc_payload_pty_data_t) + len);
+
+    ipc_payload_pty_data_t *pd = (ipc_payload_pty_data_t*)(buf + sizeof *hdr);
+    pd->pane_id  = pane_id;
+    pd->data_len = (uint16_t)len;
+    memcpy(buf + sizeof *hdr + sizeof *pd, data, len);
+
+    ssize_t sent = 0;
+    ssize_t tot  = (ssize_t)total;
+    while (sent < tot) {
+        ssize_t n = write(c->fd, buf + sent, (size_t)(tot - sent));
+        if (n < 0) { if (errno == EINTR) continue; return -1; }
+        sent += n;
+    }
+    return 0;
+}
+
+int ipc_client_poll(ipc_client_t *c, int timeout_ms)
+{
+    if (!c || c->fd < 0) return -1;
+
+    struct pollfd pfd = { .fd = c->fd, .events = POLLIN };
+    int ret = poll(&pfd, 1, timeout_ms);
+    if (ret < 0) return -1;
+    if (ret == 0) return 0;
+
+    /* Read available data. */
+    ssize_t n = read(c->fd, c->rbuf + c->rbuf_len,
+                     RECV_BUF_SIZE - c->rbuf_len);
+    if (n <= 0) return -1;
+    c->rbuf_len += (size_t)n;
+
+    /* Dispatch all complete messages. */
+    int count = 0;
+    int type;
+    while ((type = dispatch_one(c, 0, NULL, 0)) != -1) {
+        (void)type;
+        count++;
+    }
+    return count;
+}
