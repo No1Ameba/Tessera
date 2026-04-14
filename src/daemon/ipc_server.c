@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <poll.h>
 #include <sys/epoll.h>
 #include <unistd.h>
 
@@ -774,18 +775,36 @@ static void pty_output_read(ipc_server_t *srv, int pty_fd) {
         data_hdr.pane_id  = slot->pane_id;
         data_hdr.data_len = (uint16_t)n;
 
-        /* 모든 연결된 클라이언트에 브로드캐스트 */
-        for (int i = 0; i < IPC_MAX_CLIENTS; i++) {
-            int cfd = srv->clients[i].fd;
-            if (cfd < 0) continue;
-
+        /* 모든 연결된 클라이언트에 브로드캐스트 (단일 write로 atomic 전송) */
+        {
             ipc_msg_header_t hdr = IPC_HEADER_INIT(
                 IPC_MSG_PTY_OUTPUT,
                 (uint16_t)(sizeof(data_hdr) + n));
 
-            write(cfd, &hdr,      sizeof(hdr));
-            write(cfd, &data_hdr, sizeof(data_hdr));
-            write(cfd, chunk,     (size_t)n);
+            uint8_t msg[sizeof(hdr) + sizeof(data_hdr) + IPC_PTY_CHUNK_MAX];
+            memcpy(msg, &hdr, sizeof(hdr));
+            memcpy(msg + sizeof(hdr), &data_hdr, sizeof(data_hdr));
+            memcpy(msg + sizeof(hdr) + sizeof(data_hdr), chunk, (size_t)n);
+            size_t msg_len = sizeof(hdr) + sizeof(data_hdr) + (size_t)n;
+
+            for (int i = 0; i < IPC_MAX_CLIENTS; i++) {
+                int cfd = srv->clients[i].fd;
+                if (cfd < 0) continue;
+
+                /* 재시도 루프: non-blocking 소켓에서 partial write 처리 */
+                size_t sent = 0;
+                while (sent < msg_len) {
+                    ssize_t w = write(cfd, msg + sent, msg_len - sent);
+                    if (w > 0) { sent += (size_t)w; continue; }
+                    if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                        /* 잠깐 대기 후 재시도 (bridge/SSH 느린 경우) */
+                        struct pollfd pf = { cfd, POLLOUT, 0 };
+                        if (poll(&pf, 1, 100) <= 0) break; /* 100ms 타임아웃 */
+                        continue;
+                    }
+                    break; /* 에러 */
+                }
+            }
         }
     }
 
