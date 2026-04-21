@@ -1,6 +1,13 @@
 #include "session.h"
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+static int64_t mono_ms_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 /* ─── 내부 헬퍼: ID 발급 ─────────────────────────────────────────────────── */
 
@@ -29,6 +36,9 @@ session_t *session_create(session_manager_t *mgr, const char *name) {
 
     s->id = next_id(mgr);
     strncpy(s->name, name, SESSION_NAME_MAX - 1);
+    /* 생성 직후에도 5분 유예를 주기 위해 now 로 초기화. */
+    s->last_detach_ms = mono_ms_now();
+    s->attach_count   = 0;
 
     /* 리스트 앞에 삽입 */
     s->next   = mgr->head;
@@ -121,6 +131,10 @@ void window_destroy(session_t *s, window_t *w) {
     /* 하위 페인 전체 해제 */
     while (w->panes)
         pane_destroy(w, w->panes);
+
+    free(w->layout_blob);
+    w->layout_blob = NULL;
+    w->layout_blob_len = 0;
 
     /* active_window 갱신 */
     if (s->active_window == w) {

@@ -2,6 +2,7 @@
 
 #include "ipc_server.h"
 #include "session.h"
+#include "../common/config.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -87,8 +88,32 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    /* 설정 로드 — ~/.config/termemu/config.json 의 daemon 섹션 반영 */
+    {
+        termemu_config_t cfg;
+        config_defaults(&cfg);
+        const char *home = getenv("HOME");
+        if (home) {
+            char cfg_path[512];
+            snprintf(cfg_path, sizeof cfg_path,
+                     "%s/.config/termemu/config.json", home);
+            config_load_file(cfg_path, &cfg);  /* 실패 시 defaults 유지 */
+        }
+        ipc_server_configure(srv, cfg.autosave_interval,
+                              cfg.session_idle_timeout);
+        if (!daemonize)
+            fprintf(stderr,
+                    "[termemu-daemon] config: autosave=%ds, idle_timeout=%ds\n",
+                    cfg.autosave_interval, cfg.session_idle_timeout);
+    }
+
     if (!daemonize)
         fprintf(stderr, "[termemu-daemon] 시작 (pid=%d)\n", (int)getpid());
+
+    /* 이전 세션 스냅샷이 있으면 복원 (크래시 복구) */
+    int restored = ipc_server_restore_sessions(srv);
+    if (!daemonize && restored > 0)
+        fprintf(stderr, "[termemu-daemon] %d 개 세션 복원\n", restored);
 
     /* 메인 이벤트 루프 (SIGTERM/SIGINT 시 반환) */
     ipc_server_run(srv);

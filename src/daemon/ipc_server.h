@@ -35,6 +35,20 @@ ipc_server_t *ipc_server_create(session_manager_t *session_mgr);
 int ipc_server_listen(ipc_server_t *srv);
 
 /*
+ * ~/.config/termemu/sessions 디렉토리의 .json 스냅샷을 스캔하여 세션을 복원한다.
+ * 각 세션에 대해 window/pane 구조를 재생성하고 PTY 를 스폰한다.
+ * cwd 가 있으면 "cd <dir>\nclear\n" 을 PTY 에 주입하여 디렉토리 복원.
+ * ipc_server_listen() 이후, ipc_server_run() 이전에 호출.
+ * @return 복원된 세션 수 (실패는 개별적으로 건너뜀).
+ */
+int ipc_server_restore_sessions(ipc_server_t *srv);
+
+/* 설정값을 주입한다. 0 이하 값은 "기본값 유지". 비활성 (autosave=0) 도 허용. */
+void ipc_server_configure(ipc_server_t *srv,
+                           int autosave_interval_sec,
+                           int session_idle_timeout_sec);
+
+/*
  * 블로킹 epoll 이벤트 루프. SIGTERM/SIGINT 수신 또는
  * ipc_server_shutdown() 호출 시 반환한다.
  * @return  0 정상 종료, -1 오류.

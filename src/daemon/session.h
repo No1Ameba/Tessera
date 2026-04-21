@@ -47,6 +47,11 @@ typedef struct window {
     pane_t         *active_pane;  /* 현재 포커스된 페인 */
     size_t          pane_count;
 
+    /* 클라이언트가 마지막으로 업로드한 layout tree blob (재접속 복원용).
+     * 데몬은 포맷을 해석하지 않고 바이트 그대로 저장/재전송한다. */
+    uint8_t        *layout_blob;
+    uint16_t        layout_blob_len;
+
     struct session *parent;
     struct window  *next;         /* 같은 세션 내 다음 윈도우 */
 } window_t;
@@ -60,6 +65,11 @@ typedef struct session {
     window_t       *windows;        /* 윈도우 연결 리스트 헤드 */
     window_t       *active_window;  /* 현재 포커스된 윈도우 */
     size_t          window_count;
+
+    /* 수명 정책: 모든 클라이언트가 detach 된 후 일정 시간(IPC_SERVER_SESSION_IDLE_MS)
+     * 동안 재접속이 없으면 데몬이 자동으로 session_destroy 한다. */
+    int             attach_count;     /* 현재 세션에 attach 된 클라이언트 수 */
+    int64_t         last_detach_ms;   /* attach_count 가 0으로 떨어진 시각 (ms) */
 
     struct session *next;           /* 매니저 내 다음 세션 */
 } session_t;

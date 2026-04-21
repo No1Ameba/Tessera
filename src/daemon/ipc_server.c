@@ -4,6 +4,7 @@
 #include "session.h"
 #include "../common/ipc_proto.h"
 #include "../common/session_file.h"
+#include <dirent.h>
 #include "../platform/ipc.h"
 #include "../platform/termemu_pty.h"
 
@@ -24,15 +25,20 @@
 #define IPC_MAX_PANES     64
 #define IPC_EPOLL_EVENTS  32
 
+/* 세션 수명/자동 저장 기본값 (config 미설정 시). 단위: 초. */
+#define IPC_SERVER_DEFAULT_IDLE_SEC     (5 * 60)
+#define IPC_SERVER_DEFAULT_AUTOSAVE_SEC (5 * 60)
+
 /* 수신 버퍼: 헤더 + 최대 페이로드 */
 #define IPC_RBUF_SIZE  (sizeof(ipc_msg_header_t) + IPC_MAX_PAYLOAD_LEN)
 
 /* ─── 내부 타입 ──────────────────────────────────────────────────────────── */
 
 typedef struct {
-    int     fd;           /* -1: 빈 슬롯 */
-    uint8_t rbuf[IPC_RBUF_SIZE];
-    size_t  rbuf_len;
+    int      fd;           /* -1: 빈 슬롯 */
+    uint32_t session_id;   /* 0 = 아직 attach/create 안 함 */
+    uint8_t  rbuf[IPC_RBUF_SIZE];
+    size_t   rbuf_len;
 } ipc_client_slot_t;
 
 #define PANE_RING_SIZE  (256 * 1024)  /* PTY 출력 링 버퍼 크기 (attach 시 replay) */
@@ -58,7 +64,69 @@ struct ipc_server {
     ipc_pane_slot_t     panes[IPC_MAX_PANES];
     volatile int        running;
     int                 ever_had_client;  /* 첫 클라이언트 연결 후 1로 설정 */
+
+    /* 설정값 (config.json 에서 로드). 기본값은 ipc_server_create 에서 세팅. */
+    int                 autosave_interval_sec;    /* 0=비활성 */
+    int                 session_idle_timeout_sec; /* 0=즉시 destroy */
 };
+
+static int write_all_retry(int fd, const void *buf, size_t len);
+
+static int64_t mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* 세션에 남은 pane 총 개수 (모든 윈도우 합) */
+static size_t session_total_panes(const session_t *s) {
+    size_t n = 0;
+    for (const window_t *w = s->windows; w; w = w->next)
+        n += w->pane_count;
+    return n;
+}
+
+static void delete_session_snapshot(const char *sess_name);
+
+/* 세션에 pane 이 하나도 남지 않았으면 세션을 destroy 한다.
+ * (셸이 모두 종료되었거나 사용자가 모든 pane 을 닫은 경우.) */
+static void session_destroy_if_empty(ipc_server_t *srv, session_t *s) {
+    if (!s) return;
+    if (session_total_panes(s) > 0) return;
+    /* 디스크 스냅샷도 제거하여 재시작 시 복원되지 않도록 */
+    delete_session_snapshot(s->name);
+    /* PTY 슬롯 정리는 이미 호출자가 처리했으므로 session_destroy 만 호출 */
+    session_destroy(srv->session_mgr, s);
+}
+
+/* 클라이언트 슬롯의 session_id 를 변경하고 세션별 attach_count 를 갱신한다.
+ * new_sid == 0 은 detach 의미 (연결 종료 등). */
+static void client_set_session(ipc_server_t *srv,
+                                ipc_client_slot_t *c, uint32_t new_sid)
+{
+    if (!c) return;
+    if (c->session_id == new_sid) return;
+
+    if (c->session_id != 0) {
+        session_t *old = session_find_by_id(srv->session_mgr, c->session_id);
+        if (old && old->attach_count > 0) {
+            old->attach_count--;
+            if (old->attach_count == 0)
+                old->last_detach_ms = mono_ms();
+        }
+    }
+
+    c->session_id = new_sid;
+
+    if (new_sid != 0) {
+        session_t *ns = session_find_by_id(srv->session_mgr, new_sid);
+        if (ns) {
+            ns->attach_count++;
+            /* attach 중에는 idle 타이머 의미 없음 — 0으로 리셋 */
+            ns->last_detach_ms = 0;
+        }
+    }
+}
 
 /* ─── 헬퍼: fd → 슬롯 조회 ───────────────────────────────────────────────── */
 
@@ -175,6 +243,9 @@ static void handle_session_create(ipc_server_t *srv, int client_fd,
     resp.session_id = s->id;
     strncpy(resp.name, s->name, sizeof(resp.name) - 1);
     send_msg(client_fd, IPC_MSG_SESSION_CREATED, &resp, sizeof(resp));
+
+    /* 생성자 클라이언트는 암묵적으로 attach */
+    client_set_session(srv, client_by_fd(srv, client_fd), s->id);
 }
 
 static void handle_session_destroy(ipc_server_t *srv, int client_fd,
@@ -205,6 +276,7 @@ static void handle_session_destroy(ipc_server_t *srv, int client_fd,
         }
     }
 
+    delete_session_snapshot(s->name);
     session_destroy(srv->session_mgr, s);
     send_ok(client_fd);
 }
@@ -334,6 +406,41 @@ static void handle_window_focus(ipc_server_t *srv, int client_fd,
     send_ok(client_fd);
 }
 
+/* 클라이언트가 layout tree blob 을 업로드한다. 데몬은 저장만 한다. */
+static void handle_window_layout(ipc_server_t *srv, int client_fd,
+                                  const uint8_t *payload, uint16_t plen) {
+    if (plen < sizeof(ipc_payload_window_layout_t)) {
+        send_error(client_fd, IPC_MSG_WINDOW_LAYOUT,
+                   IPC_ERR_INVALID_MSG, "payload too short");
+        return;
+    }
+    const ipc_payload_window_layout_t *req =
+        (const ipc_payload_window_layout_t *)payload;
+    if (plen < sizeof(*req) + req->blob_len) {
+        send_error(client_fd, IPC_MSG_WINDOW_LAYOUT,
+                   IPC_ERR_INVALID_MSG, "blob truncated");
+        return;
+    }
+    session_t *s = session_find_by_id(srv->session_mgr, req->session_id);
+    if (!s) { send_error(client_fd, IPC_MSG_WINDOW_LAYOUT,
+                          IPC_ERR_SESSION_NOT_FOUND, "session not found"); return; }
+    window_t *w = window_find_by_id(s, req->window_id);
+    if (!w) { send_error(client_fd, IPC_MSG_WINDOW_LAYOUT,
+                          IPC_ERR_WINDOW_NOT_FOUND, "window not found"); return; }
+
+    free(w->layout_blob);
+    w->layout_blob = NULL;
+    w->layout_blob_len = 0;
+    if (req->blob_len > 0) {
+        w->layout_blob = malloc(req->blob_len);
+        if (w->layout_blob) {
+            memcpy(w->layout_blob, payload + sizeof(*req), req->blob_len);
+            w->layout_blob_len = req->blob_len;
+        }
+    }
+    send_ok(client_fd);
+}
+
 static void handle_pane_create(ipc_server_t *srv, int client_fd,
                                 const uint8_t *payload, uint16_t plen) {
     if (plen < sizeof(ipc_payload_pane_create_t)) {
@@ -400,6 +507,29 @@ static void handle_pane_create(ipc_server_t *srv, int client_fd,
     resp.pane_id    = p->id;
     resp.pid        = (int32_t)pty.child_pid;
     send_msg(client_fd, IPC_MSG_PANE_CREATED, &resp, sizeof(resp));
+
+    /* split 이라면 다른 attach 된 클라이언트들에 NOTIFY 브로드캐스트 */
+    if (req->parent_pane_id != 0) {
+        ipc_payload_pane_split_notify_t notify;
+        memset(&notify, 0, sizeof(notify));
+        notify.session_id     = s->id;
+        notify.window_id      = w->id;
+        notify.parent_pane_id = req->parent_pane_id;
+        notify.new_pane_id    = p->id;
+        notify.cols           = req->cols;
+        notify.rows           = req->rows;
+        notify.direction      = req->direction;
+        notify.ratio          = req->ratio;
+
+        ipc_msg_header_t nhdr = IPC_HEADER_INIT(IPC_MSG_PANE_SPLIT_NOTIFY,
+                                                 sizeof(notify));
+        for (int i = 0; i < IPC_MAX_CLIENTS; i++) {
+            int cfd = srv->clients[i].fd;
+            if (cfd < 0 || cfd == client_fd) continue;
+            write(cfd, &nhdr,   sizeof(nhdr));
+            write(cfd, &notify, sizeof(notify));
+        }
+    }
 }
 
 static void handle_pane_destroy(ipc_server_t *srv, int client_fd,
@@ -439,8 +569,22 @@ static void handle_pane_destroy(ipc_server_t *srv, int client_fd,
         slot->pty_fd = -1;
     }
 
+    /* 다른 클라이언트들에 pane 제거를 알린다 (shell-exit 경로와 동일 메시지) */
+    ipc_payload_pane_ref_t nref = { .session_id = s->id,
+                                     .window_id  = w->id,
+                                     .pane_id    = p->id };
+    ipc_msg_header_t nhdr = IPC_HEADER_INIT(IPC_MSG_PANE_EXITED, sizeof(nref));
+    for (int i = 0; i < IPC_MAX_CLIENTS; i++) {
+        int cfd = srv->clients[i].fd;
+        if (cfd < 0 || cfd == client_fd) continue;
+        write(cfd, &nhdr, sizeof(nhdr));
+        write(cfd, &nref, sizeof(nref));
+    }
+
     pane_destroy(w, p);
     send_ok(client_fd);
+
+    session_destroy_if_empty(srv, s);
 }
 
 static void handle_pane_resize(ipc_server_t *srv, int client_fd,
@@ -581,20 +725,32 @@ static void handle_session_attach(ipc_server_t *srv, int client_fd,
     }
 
     /* 응답 전송: 헤더 + pane 배열 */
+    /* 첫 윈도우의 layout blob 을 동봉한다 (현재 구조는 세션당 단일 윈도우 사용). */
+    window_t *first_w = s->windows;
+    const uint8_t *lb = first_w ? first_w->layout_blob : NULL;
+    uint16_t lb_len = first_w ? first_w->layout_blob_len : 0;
+
     ipc_payload_session_attach_r_t resp;
     memset(&resp, 0, sizeof(resp));
     resp.session_id = s->id;
     resp.pane_count = (uint32_t)pane_count;
     strncpy(resp.session_name, s->name, sizeof(resp.session_name) - 1);
+    resp.layout_blob_len = lb_len;
 
     size_t arr_sz = (size_t)pane_count * sizeof(ipc_attach_pane_info_t);
-    uint16_t total = (uint16_t)(sizeof(resp) + arr_sz);
-    uint8_t buf[sizeof(ipc_msg_header_t) + sizeof(resp) + sizeof(panes)];
+    uint16_t total = (uint16_t)(sizeof(resp) + arr_sz + lb_len);
     ipc_msg_header_t hdr = IPC_HEADER_INIT(IPC_MSG_SESSION_ATTACH_R, total);
+
+    uint8_t buf[sizeof(hdr) + sizeof(resp) + sizeof(panes) + UINT16_MAX];
     memcpy(buf, &hdr, sizeof(hdr));
     memcpy(buf + sizeof(hdr), &resp, sizeof(resp));
     memcpy(buf + sizeof(hdr) + sizeof(resp), panes, arr_sz);
-    write(client_fd, buf, sizeof(hdr) + total);
+    if (lb_len > 0 && lb)
+        memcpy(buf + sizeof(hdr) + sizeof(resp) + arr_sz, lb, lb_len);
+    write_all_retry(client_fd, buf, sizeof(hdr) + total);
+
+    /* 이 클라이언트를 세션에 attach 상태로 기록 (수명 관리용) */
+    client_set_session(srv, client_by_fd(srv, client_fd), s->id);
 
     /* replay는 별도 PANE_REPLAY 메시지로 요청 (pane_slot 생성 후) */
 }
@@ -690,52 +846,70 @@ static void handle_session_save(ipc_server_t *srv, int client_fd,
     free(json_buf);
 }
 
+/* 재시도 포함 non-blocking 완전 write. 실패 시 -1. */
+static int write_all_retry(int fd, const void *buf, size_t len) {
+    const uint8_t *p = buf;
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t w = write(fd, p + sent, len - sent);
+        if (w > 0) { sent += (size_t)w; continue; }
+        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+            struct pollfd pf = { fd, POLLOUT, 0 };
+            if (poll(&pf, 1, 500) <= 0) return -1;
+            continue;
+        }
+        return -1;
+    }
+    return 0;
+}
+
 static void handle_pane_replay(ipc_server_t *srv, int client_fd,
                                 const uint8_t *payload, uint16_t plen)
 {
     if (plen < sizeof(uint32_t)) return;
     uint32_t pane_id = *(const uint32_t *)payload;
 
+    /* pty_fd 상태와 무관하게 pane_id 매치 (클라이언트가 남은 버퍼라도 받을 수 있게). */
     ipc_pane_slot_t *ps = NULL;
     for (int j = 0; j < IPC_MAX_PANES; j++) {
-        if (srv->panes[j].pty_fd >= 0 && srv->panes[j].pane_id == pane_id) {
+        if (srv->panes[j].pane_id == pane_id && srv->panes[j].ring_count > 0) {
             ps = &srv->panes[j];
             break;
         }
     }
-    if (!ps || ps->ring_count == 0) {
-        /* 빈 버퍼 — OK 응답 */
+    if (!ps) {
         ipc_msg_header_t ok = IPC_HEADER_INIT(IPC_MSG_OK, 0);
-        write(client_fd, &ok, sizeof(ok));
+        write_all_retry(client_fd, &ok, sizeof(ok));
         return;
     }
 
     size_t start = (ps->ring_head + PANE_RING_SIZE - ps->ring_count) % PANE_RING_SIZE;
     size_t remaining = ps->ring_count;
+    size_t total_sent = 0;
 
     while (remaining > 0) {
         size_t chunk = remaining > IPC_PTY_CHUNK_MAX ? IPC_PTY_CHUNK_MAX : remaining;
-        uint8_t tmp[IPC_PTY_CHUNK_MAX];
-        for (size_t k = 0; k < chunk; k++)
-            tmp[k] = ps->ring[(start + k) % PANE_RING_SIZE];
-
-        ipc_payload_pty_data_t dh;
-        dh.pane_id  = pane_id;
-        dh.data_len = (uint16_t)chunk;
-
+        uint8_t combined[sizeof(ipc_msg_header_t) + sizeof(ipc_payload_pty_data_t) + IPC_PTY_CHUNK_MAX];
+        ipc_payload_pty_data_t dh = { .pane_id = pane_id, .data_len = (uint16_t)chunk };
         uint16_t msg_len = (uint16_t)(sizeof(dh) + chunk);
         ipc_msg_header_t mh = IPC_HEADER_INIT(IPC_MSG_PTY_OUTPUT, msg_len);
-        write(client_fd, &mh, sizeof(mh));
-        write(client_fd, &dh, sizeof(dh));
-        write(client_fd, tmp, chunk);
+        memcpy(combined, &mh, sizeof(mh));
+        memcpy(combined + sizeof(mh), &dh, sizeof(dh));
+        for (size_t k = 0; k < chunk; k++)
+            combined[sizeof(mh) + sizeof(dh) + k] = ps->ring[(start + k) % PANE_RING_SIZE];
 
+        if (write_all_retry(client_fd, combined,
+                            sizeof(mh) + sizeof(dh) + chunk) < 0)
+            return;
+        total_sent += chunk;
         start = (start + chunk) % PANE_RING_SIZE;
         remaining -= chunk;
     }
+    (void)total_sent;
 
     /* 완료 마커 */
     ipc_msg_header_t ok = IPC_HEADER_INIT(IPC_MSG_OK, 0);
-    write(client_fd, &ok, sizeof(ok));
+    write_all_retry(client_fd, &ok, sizeof(ok));
 }
 
 static void dispatch_message(ipc_server_t *srv, int client_fd,
@@ -775,6 +949,9 @@ static void dispatch_message(ipc_server_t *srv, int client_fd,
         case IPC_MSG_WINDOW_FOCUS:
             handle_window_focus(srv, client_fd, payload, hdr->payload_len);
             break;
+        case IPC_MSG_WINDOW_LAYOUT:
+            handle_window_layout(srv, client_fd, payload, hdr->payload_len);
+            break;
         case IPC_MSG_PANE_CREATE:
             handle_pane_create(srv, client_fd, payload, hdr->payload_len);
             break;
@@ -800,6 +977,8 @@ static void dispatch_message(ipc_server_t *srv, int client_fd,
 /* ─── 클라이언트 데이터 수신 ─────────────────────────────────────────────── */
 
 static void client_remove(ipc_server_t *srv, ipc_client_slot_t *c) {
+    /* 세션 attach 해제 (last_detach_ms 갱신) */
+    client_set_session(srv, c, 0);
     epoll_del(srv, c->fd);
     close(c->fd);
     c->fd       = -1;
@@ -927,6 +1106,9 @@ static void pty_output_read(ipc_server_t *srv, int pty_fd) {
         window_t  *w = s ? window_find_by_id(s, slot->window_id) : NULL;
         pane_t    *p = w ? pane_find_by_id(w, slot->pane_id)    : NULL;
         if (p) pane_destroy(w, p);
+
+        /* 세션의 마지막 pane 이었으면 세션 자체도 제거 (useless empty session 방지) */
+        if (s) session_destroy_if_empty(srv, s);
     }
 }
 
@@ -942,8 +1124,13 @@ ipc_server_t *ipc_server_create(session_manager_t *session_mgr) {
     srv->epoll_fd    = -1;
     srv->session_mgr = session_mgr;
     srv->running     = 0;
+    srv->autosave_interval_sec    = IPC_SERVER_DEFAULT_AUTOSAVE_SEC;
+    srv->session_idle_timeout_sec = IPC_SERVER_DEFAULT_IDLE_SEC;
 
-    for (int i = 0; i < IPC_MAX_CLIENTS; i++) srv->clients[i].fd    = -1;
+    for (int i = 0; i < IPC_MAX_CLIENTS; i++) {
+        srv->clients[i].fd         = -1;
+        srv->clients[i].session_id = 0;
+    }
     for (int i = 0; i < IPC_MAX_PANES;   i++) srv->panes[i].pty_fd  = -1;
 
     return srv;
@@ -975,6 +1162,154 @@ int ipc_server_listen(ipc_server_t *srv) {
     return 0;
 }
 
+/* 단일 스냅샷을 기반으로 session/window/pane 구조를 재건하고 PTY 를 스폰한다. */
+static int restore_one_snapshot(ipc_server_t *srv, const session_snapshot_t *snap)
+{
+    if (snap->window_count == 0) return -1;
+
+    /* 같은 이름의 세션이 이미 있으면 (데몬이 살아있는 동안 저장된 경우) 건너뜀 */
+    if (session_find_by_name(srv->session_mgr, snap->name)) return -1;
+
+    session_t *s = session_create(srv->session_mgr, snap->name);
+    if (!s) return -1;
+
+    for (int wi = 0; wi < snap->window_count; wi++) {
+        const snap_window_t *sw = &snap->windows[wi];
+        window_t *w = window_create(s, sw->name);
+        if (!w) continue;
+
+        for (int pi = 0; pi < sw->pane_count; pi++) {
+            const snap_pane_t *sp = &sw->panes[pi];
+            uint16_t cols = sp->cols > 0 ? sp->cols : 80;
+            uint16_t rows = sp->rows > 0 ? sp->rows : 24;
+
+            ipc_pane_slot_t *slot = pane_empty_slot(srv);
+            if (!slot) break;
+
+            pane_t *p = pane_create(w, cols, rows);
+            if (!p) break;
+
+            pty_t pty;
+            if (pty_spawn(&pty, NULL, cols, rows) < 0) {
+                pane_destroy(w, p);
+                continue;
+            }
+            p->pty_fd = pty.master_fd;
+            p->pid    = (int)pty.child_pid;
+            slot->pty_fd     = pty.master_fd;
+            slot->pane_id    = p->id;
+            slot->session_id = s->id;
+            slot->window_id  = w->id;
+            slot->ring_head  = 0;
+            slot->ring_count = 0;
+
+            epoll_add(srv, pty.master_fd, EPOLLIN | EPOLLET);
+
+            /* cwd 복원: 셸 프롬프트가 준비된 후 cd + clear 주입 */
+            if (sp->cwd[0]) {
+                char cmd[SNAP_CWD_MAX + 16];
+                int n = snprintf(cmd, sizeof cmd, "cd %s\nclear\n", sp->cwd);
+                if (n > 0) pty_write(&pty, (const uint8_t *)cmd, (size_t)n);
+            }
+        }
+    }
+    return 0;
+}
+
+/* ~/.config/termemu/sessions/<name>.json 경로 조립. home 없으면 -1. */
+static int snapshot_path(const char *sess_name, char *out, size_t out_size)
+{
+    const char *home = getenv("HOME");
+    if (!home) return -1;
+    int n = snprintf(out, out_size, "%s/.config/termemu/sessions/%s.json",
+                     home, sess_name);
+    return (n > 0 && (size_t)n < out_size) ? 0 : -1;
+}
+
+/* 세션이 영구 소멸 시 디스크 스냅샷도 제거 (재시작 후 복원 방지). */
+static void delete_session_snapshot(const char *sess_name)
+{
+    char p[512];
+    if (snapshot_path(sess_name, p, sizeof p) == 0)
+        unlink(p);
+}
+
+/* 모든 활성 세션을 디스크에 저장한다. auto-save 와 shutdown-save 공용. */
+static void save_all_sessions(ipc_server_t *srv)
+{
+    const char *home = getenv("HOME");
+    if (!home) return;
+    char dir[256];
+    snprintf(dir, sizeof dir, "%s/.config/termemu/sessions", home);
+    mkdir(dir, 0755);
+    for (session_t *s = srv->session_mgr->head; s; s = s->next) {
+        session_snapshot_t snap;
+        memset(&snap, 0, sizeof snap);
+        strncpy(snap.name, s->name, SNAP_NAME_MAX - 1);
+        int wi = 0;
+        for (window_t *w = s->windows; w && wi < SNAP_MAX_WINDOWS; w = w->next, wi++) {
+            snap_window_t *sw = &snap.windows[wi];
+            strncpy(sw->name, w->name, SNAP_NAME_MAX - 1);
+            int pi = 0;
+            for (pane_t *p = w->panes; p && pi < SNAP_MAX_PANES; p = p->next, pi++) {
+                sw->panes[pi].cols = p->cols;
+                sw->panes[pi].rows = p->rows;
+                if (p->pid > 0) {
+                    char pp[64];
+                    snprintf(pp, sizeof pp, "/proc/%d/cwd", p->pid);
+                    ssize_t l = readlink(pp, sw->panes[pi].cwd, SNAP_CWD_MAX - 1);
+                    if (l > 0) sw->panes[pi].cwd[l] = '\0';
+                }
+            }
+            sw->pane_count = pi;
+        }
+        snap.window_count = wi;
+        char fpath[512];
+        snprintf(fpath, sizeof fpath, "%s/%s.json", dir, s->name);
+        session_snapshot_save(fpath, &snap);
+    }
+}
+
+int ipc_server_restore_sessions(ipc_server_t *srv)
+{
+    if (!srv) return 0;
+
+    const char *home = getenv("HOME");
+    if (!home) return 0;
+    char dir[512];
+    snprintf(dir, sizeof dir, "%s/.config/termemu/sessions", home);
+
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+
+    int restored = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        const char *nm = ent->d_name;
+        size_t nlen = strlen(nm);
+        if (nlen < 6 || strcmp(nm + nlen - 5, ".json") != 0) continue;
+
+        char fpath[1024];
+        snprintf(fpath, sizeof fpath, "%s/%s", dir, nm);
+
+        session_snapshot_t snap;
+        memset(&snap, 0, sizeof snap);
+        if (session_snapshot_load(fpath, &snap) != 0) continue;
+
+        if (restore_one_snapshot(srv, &snap) == 0) {
+            restored++;
+            fprintf(stderr, "[termemu-daemon] restored session '%s' (%d windows)\n",
+                    snap.name, snap.window_count);
+        }
+    }
+    closedir(d);
+
+    /* 세션이 복원되었으면 ever_had_client 를 올려 "빈 데몬 자동 종료" 를 유예.
+     * 클라이언트 한 번도 안 붙어도 auto-shutdown 되지 않도록. */
+    if (restored > 0) srv->ever_had_client = 1;
+    return restored;
+}
+
 int ipc_server_run(ipc_server_t *srv) {
     if (!srv || srv->listen_fd < 0 || srv->epoll_fd < 0) return -1;
 
@@ -1001,76 +1336,70 @@ int ipc_server_run(ipc_server_t *srv) {
                     close(cfd);
                     continue;
                 }
-                slot->fd       = cfd;
-                slot->rbuf_len = 0;
+                slot->fd         = cfd;
+                slot->session_id = 0;
+                slot->rbuf_len   = 0;
                 srv->ever_had_client = 1;
                 epoll_add(srv, cfd, EPOLLIN | EPOLLET);
 
-            } else if (events[i].events & (EPOLLHUP | EPOLLERR)) {
-                /* PTY 또는 클라이언트 오류/종료 */
+            } else {
+                /* PTY 또는 클라이언트 I/O. HUP/ERR 도 데이터 drain + EOF 정리 경로로
+                 * 흘려보낸다 — 셸 exit 시 EPOLLHUP 만 오고 EPOLLIN 이 재트리거되지
+                 * 않아 PANE_EXITED 브로드캐스트가 누락되던 버그 수정. */
                 ipc_client_slot_t *c = client_by_fd(srv, fd);
                 if (c) {
-                    client_remove(srv, c);
+                    if (events[i].events & EPOLLIN)
+                        client_read(srv, c);
+                    if (events[i].events & (EPOLLHUP | EPOLLERR))
+                        client_remove(srv, c);
                 } else {
-                    ipc_pane_slot_t *ps = pane_by_pty_fd(srv, fd);
-                    if (ps) {
-                        epoll_del(srv, ps->pty_fd);
-                        ps->pty_fd = -1;
-                    }
-                }
-
-            } else if (events[i].events & EPOLLIN) {
-                ipc_client_slot_t *c = client_by_fd(srv, fd);
-                if (c) {
-                    client_read(srv, c);
-                } else {
-                    /* PTY 출력 데이터 */
+                    /* PTY fd: pty_output_read 가 pty_read 의 EIO/EAGAIN 를 보고
+                     * EOF 여부를 판별, PANE_EXITED 브로드캐스트 + pane_destroy 까지
+                     * 일괄 처리한다. HUP/ERR 만 와도 한 번 호출하면 정리됨. */
                     pty_output_read(srv, fd);
                 }
             }
         }
 
-        /* ── 자동 저장 ── */
-        {
+        /* ── 자동 저장 (설정값 주기) ── */
+        if (srv->autosave_interval_sec > 0) {
             static time_t last_save = 0;
             if (last_save == 0) last_save = time(NULL);
             time_t now = time(NULL);
-            int interval = 300; /* TODO: config에서 읽기 */
-            if (interval > 0 && (now - last_save) >= interval) {
+            if ((now - last_save) >= srv->autosave_interval_sec) {
                 last_save = now;
-                /* 모든 세션 스냅샷 저장 */
-                char dir[256];
-                const char *home = getenv("HOME");
-                if (home) {
-                    snprintf(dir, sizeof dir, "%s/.config/termemu/sessions", home);
-                    mkdir(dir, 0755);  /* 디렉토리 없으면 생성 */
-                    for (session_t *s = srv->session_mgr->head; s; s = s->next) {
-                        session_snapshot_t snap;
-                        memset(&snap, 0, sizeof snap);
-                        strncpy(snap.name, s->name, SNAP_NAME_MAX - 1);
-                        int wi = 0;
-                        for (window_t *w = s->windows; w && wi < SNAP_MAX_WINDOWS; w = w->next, wi++) {
-                            snap_window_t *sw = &snap.windows[wi];
-                            strncpy(sw->name, w->name, SNAP_NAME_MAX - 1);
-                            int pi = 0;
-                            for (pane_t *p = w->panes; p && pi < SNAP_MAX_PANES; p = p->next, pi++) {
-                                sw->panes[pi].cols = p->cols;
-                                sw->panes[pi].rows = p->rows;
-                                if (p->pid > 0) {
-                                    char pp[64];
-                                    snprintf(pp, sizeof pp, "/proc/%d/cwd", p->pid);
-                                    ssize_t l = readlink(pp, sw->panes[pi].cwd, SNAP_CWD_MAX - 1);
-                                    if (l > 0) sw->panes[pi].cwd[l] = '\0';
-                                }
+                save_all_sessions(srv);
+            }
+        }
+
+        /* ── 세션 수명 정책 스윕 ──
+         * 모든 클라이언트가 detach 된 후 session_idle_timeout_sec 가 경과하면
+         * 세션을 자동으로 destroy 한다. */
+        {
+            int64_t now_ms = mono_ms();
+            int64_t idle_ms = (int64_t)srv->session_idle_timeout_sec * 1000;
+            session_t *s = srv->session_mgr->head;
+            while (s) {
+                session_t *next = s->next;
+                if (s->attach_count == 0 && s->last_detach_ms != 0 &&
+                    (now_ms - s->last_detach_ms) >= idle_ms) {
+                    /* 세션 내 모든 pane 의 PTY fd 를 epoll 에서 제거하고 닫는다 */
+                    for (window_t *w = s->windows; w; w = w->next) {
+                        for (pane_t *p = w->panes; p; p = p->next) {
+                            ipc_pane_slot_t *slot = pane_by_id(srv, p->id);
+                            if (slot && slot->pty_fd >= 0) {
+                                epoll_del(srv, slot->pty_fd);
+                                pty_t pt = { .master_fd = slot->pty_fd,
+                                             .child_pid = (pid_t)p->pid };
+                                pty_close(&pt, NULL);
+                                slot->pty_fd = -1;
                             }
-                            sw->pane_count = pi;
                         }
-                        snap.window_count = wi;
-                        char fpath[512];
-                        snprintf(fpath, sizeof fpath, "%s/%s.json", dir, s->name);
-                        session_snapshot_save(fpath, &snap);
                     }
+                    delete_session_snapshot(s->name);
+                    session_destroy(srv->session_mgr, s);
                 }
+                s = next;
             }
         }
 
@@ -1091,8 +1420,23 @@ void ipc_server_shutdown(ipc_server_t *srv) {
     if (srv) srv->running = 0;
 }
 
+void ipc_server_configure(ipc_server_t *srv,
+                           int autosave_interval_sec,
+                           int session_idle_timeout_sec)
+{
+    if (!srv) return;
+    /* 음수는 "기본값 유지". 0 은 autosave 비활성/세션 즉시 destroy 의 의미로 허용. */
+    if (autosave_interval_sec >= 0)
+        srv->autosave_interval_sec = autosave_interval_sec;
+    if (session_idle_timeout_sec >= 0)
+        srv->session_idle_timeout_sec = session_idle_timeout_sec;
+}
+
 void ipc_server_destroy(ipc_server_t *srv) {
     if (!srv) return;
+
+    /* 종료 직전 스냅샷 저장 (크래시 복구 데이터 최신화) */
+    save_all_sessions(srv);
 
     /* 클라이언트 fd 정리 */
     for (int i = 0; i < IPC_MAX_CLIENTS; i++) {

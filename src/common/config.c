@@ -169,7 +169,8 @@ void config_defaults(termemu_config_t *cfg) {
     cfg->cursor_blink     = true;
     strncpy(cfg->theme_name, "default", sizeof(cfg->theme_name) - 1);
     cfg->bell_visual      = false;
-    cfg->autosave_interval = 300;  /* 기본 5분 */
+    cfg->autosave_interval    = 300;  /* 기본 5분 */
+    cfg->session_idle_timeout = 300;  /* 기본 5분: detach 후 세션 유지 기간 */
 
     keybindings_t *kb = &cfg->keybindings;
     strncpy(kb->split_vertical,   "Alt+minus",   sizeof(kb->split_vertical) - 1);
@@ -271,6 +272,23 @@ bool config_load_string(const char *json, termemu_config_t *cfg) {
             cfg->bell_visual = cJSON_IsTrue(item);
     }
 
+    /* daemon (세션 수명 관리) */
+    sub = cJSON_GetObjectItemCaseSensitive(root, "daemon");
+    if (cJSON_IsObject(sub)) {
+        item = cJSON_GetObjectItemCaseSensitive(sub, "autosave_interval");
+        if (cJSON_IsNumber(item)) {
+            int v = item->valueint;
+            if (v < 0) v = 0;
+            cfg->autosave_interval = v;
+        }
+        item = cJSON_GetObjectItemCaseSensitive(sub, "session_idle_timeout");
+        if (cJSON_IsNumber(item)) {
+            int v = item->valueint;
+            if (v < 0) v = 0;
+            cfg->session_idle_timeout = v;
+        }
+    }
+
     /* keybindings */
     sub = cJSON_GetObjectItemCaseSensitive(root, "keybindings");
     if (cJSON_IsObject(sub)) {
@@ -338,6 +356,12 @@ bool config_save_file(const char *path, const termemu_config_t *cfg) {
     cJSON *bell = cJSON_CreateObject();
     cJSON_AddBoolToObject(bell, "visual", cfg->bell_visual);
     cJSON_AddItemToObject(root, "bell", bell);
+
+    /* daemon */
+    cJSON *daemon_obj = cJSON_CreateObject();
+    cJSON_AddNumberToObject(daemon_obj, "autosave_interval",    cfg->autosave_interval);
+    cJSON_AddNumberToObject(daemon_obj, "session_idle_timeout", cfg->session_idle_timeout);
+    cJSON_AddItemToObject(root, "daemon", daemon_obj);
 
     /* keybindings */
     const keybindings_t *kb = &cfg->keybindings;

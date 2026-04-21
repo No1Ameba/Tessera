@@ -73,7 +73,8 @@ typedef struct {
     bool           cursor_blink;
     char           theme_name[256];
     bool           bell_visual;
-    int            autosave_interval;  /* 자동 저장 주기 (초, 0=비활성) */
+    int            autosave_interval;     /* 세션 자동 저장 주기 (초, 0=비활성) */
+    int            session_idle_timeout;  /* 모든 클라이언트 detach 후 세션 유지 시간 (초) */
     keybindings_t  keybindings;
 } termemu_config_t;
 
