@@ -145,21 +145,21 @@
       `[A-Za-z0-9_]` 연속 vs 공백/기호 경계로 판정.
 
 ### 테마 관리
-14. [ ] **샘플 테마 + 드롭다운 선택**
+14. [x] **샘플 테마 + 드롭다운 선택** ✅ (VS Code Dark+ / Solarized Dark/Light / Dracula / Nord / Gruvbox Dark + Custom 자동 전환)
     - 내장 샘플: VS Code Dark+ / Solarized Dark / Solarized Light /
       Dracula / Nord / Gruvbox 등 4~6 개.
     - 설정창 Colors 탭 상단에 Theme 드롭다운. 선택 시 전체 팔레트 교체.
     - 사용자가 팔레트 셀 하나라도 바꾸면 드롭다운이 자동으로 "Custom" 으로
       전환 (내장 테마와 한 군데라도 다르면 Custom).
 
-15. [ ] **테마 Import / Export UI**
+15. [x] **테마 Import / Export UI** ✅ (#16 작업에서 settings Export 탭 버튼으로 함께 구현)
     - Export 버튼: 현재 테마를 파일로 저장. 파일 picker 로 경로 지정.
     - Import 버튼: 파일 picker 로 JSON 테마 로드 후 적용.
       (기존 Export 텍스트 입력 방식은 파일 picker 로 대체.)
     - 기존 `theme_save_file` / `theme_load_string` 재사용.
 
 ### 파일 picker (공통 인프라)
-16. [ ] **네이티브 파일 선택 다이얼로그**
+16. [x] **네이티브 파일 선택 다이얼로그** ✅ (zenity/kdialog popen 래퍼, Config/Theme Import·Export 에서 사용)
     - Nuklear 는 파일 picker 미제공.
     - 옵션 A: `zenity` / `kdialog` 외부 프로세스 호출
       (Linux 다수 환경에서 설치되어 있음, popen 으로 경로 문자열 수신).
