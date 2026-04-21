@@ -11,6 +11,7 @@ if(TERMEMU_BUILD_APPS)
         ui/input.c
         ui/nk_impl.c
         ui/settings_ui.c
+        ui/file_picker.c
     )
 
     target_include_directories(termemu PRIVATE

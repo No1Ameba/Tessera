@@ -1,4 +1,5 @@
 #include "settings_ui.h"
+#include "file_picker.h"
 
 #define NK_INCLUDE_FIXED_TYPES
 #define NK_INCLUDE_STANDARD_IO
@@ -70,8 +71,6 @@ static void color_row(struct nk_context *ctx, const char *label, uint32_t *color
 
 static int g_active_tab = 0;  /* 0=Font, 1=Window, 2=Keys, 3=Colors, 4=Export */
 
-static char g_export_path[256] = {0};
-static char g_import_path[256] = {0};
 static char g_status_msg[512] = {0};
 
 /* ── 탭 버튼 행 ─────────────────────────────────────────────────────────── */
@@ -310,63 +309,68 @@ static void tab_export(struct nk_context *ctx,
                         termemu_config_t *cfg, termemu_theme_t *theme,
                         const char *cfg_path, const char *theme_path)
 {
-    nk_layout_row_dynamic(ctx, 25, 1);
-    nk_label(ctx, "Export config to file:", NK_TEXT_LEFT);
-
-    nk_layout_row_begin(ctx, NK_DYNAMIC, 30, 2);
-    nk_layout_row_push(ctx, 0.75f);
-    nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD,
-        g_export_path, sizeof(g_export_path), nk_filter_default);
-    nk_layout_row_push(ctx, 0.25f);
-    if (nk_button_label(ctx, "Export")) {
-        if (g_export_path[0]) {
-            config_save_file(g_export_path, cfg);
+    /* Config Export — 파일 picker 로 경로 선택 */
+    nk_layout_row_dynamic(ctx, 30, 2);
+    if (nk_button_label(ctx, "Export Config...")) {
+        char path[512];
+        int r = file_picker_save(path, sizeof path,
+                                   "Export Config", "config.json", "*.json");
+        if (r == 1 && path[0]) {
+            if (config_save_file(path, cfg))
+                snprintf(g_status_msg, sizeof g_status_msg, "Exported to %.480s", path);
+            else
+                snprintf(g_status_msg, sizeof g_status_msg, "Export failed: %.480s", path);
+        } else if (r == -1) {
             snprintf(g_status_msg, sizeof g_status_msg,
-                     "Exported to %s", g_export_path);
+                     "File picker unavailable (install zenity or kdialog)");
         }
     }
-    nk_layout_row_end(ctx);
+    if (nk_button_label(ctx, "Import Config...")) {
+        char path[512];
+        int r = file_picker_open(path, sizeof path, "Import Config", "*.json");
+        if (r == 1 && path[0]) {
+            if (config_load_file(path, cfg))
+                snprintf(g_status_msg, sizeof g_status_msg, "Imported from %.480s", path);
+            else
+                snprintf(g_status_msg, sizeof g_status_msg, "Import failed: %.480s", path);
+        } else if (r == -1) {
+            snprintf(g_status_msg, sizeof g_status_msg,
+                     "File picker unavailable (install zenity or kdialog)");
+        }
+    }
 
-    nk_layout_row_dynamic(ctx, 15, 1);
+    nk_layout_row_dynamic(ctx, 8, 1);
     nk_spacing(ctx, 1);
 
-    nk_layout_row_dynamic(ctx, 25, 1);
-    nk_label(ctx, "Import config from file:", NK_TEXT_LEFT);
-
-    nk_layout_row_begin(ctx, NK_DYNAMIC, 30, 2);
-    nk_layout_row_push(ctx, 0.75f);
-    nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD,
-        g_import_path, sizeof(g_import_path), nk_filter_default);
-    nk_layout_row_push(ctx, 0.25f);
-    if (nk_button_label(ctx, "Import")) {
-        if (g_import_path[0]) {
-            config_load_file(g_import_path, cfg);
+    /* Theme Export / Import */
+    nk_layout_row_dynamic(ctx, 30, 2);
+    if (nk_button_label(ctx, "Export Theme...")) {
+        char path[512];
+        int r = file_picker_save(path, sizeof path,
+                                   "Export Theme", "theme.json", "*.json");
+        if (r == 1 && path[0]) {
+            if (theme_save_file(path, theme))
+                snprintf(g_status_msg, sizeof g_status_msg, "Theme exported to %.480s", path);
+            else
+                snprintf(g_status_msg, sizeof g_status_msg, "Export failed: %.480s", path);
+        } else if (r == -1) {
             snprintf(g_status_msg, sizeof g_status_msg,
-                     "Imported from %s", g_import_path);
+                     "File picker unavailable (install zenity or kdialog)");
         }
     }
-    nk_layout_row_end(ctx);
-
-    nk_layout_row_dynamic(ctx, 15, 1);
-    nk_spacing(ctx, 1);
-
-    nk_layout_row_dynamic(ctx, 25, 1);
-    nk_label(ctx, "Export theme to file:", NK_TEXT_LEFT);
-
-    static char theme_export[256] = {0};
-    nk_layout_row_begin(ctx, NK_DYNAMIC, 30, 2);
-    nk_layout_row_push(ctx, 0.75f);
-    nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD,
-        theme_export, sizeof(theme_export), nk_filter_default);
-    nk_layout_row_push(ctx, 0.25f);
-    if (nk_button_label(ctx, "Export")) {
-        if (theme_export[0]) {
-            theme_save_file(theme_export, theme);
+    if (nk_button_label(ctx, "Import Theme...")) {
+        char path[512];
+        int r = file_picker_open(path, sizeof path, "Import Theme", "*.json");
+        if (r == 1 && path[0]) {
+            if (theme_load_file(path, theme))
+                snprintf(g_status_msg, sizeof g_status_msg, "Theme imported from %.480s", path);
+            else
+                snprintf(g_status_msg, sizeof g_status_msg, "Import failed: %.480s", path);
+        } else if (r == -1) {
             snprintf(g_status_msg, sizeof g_status_msg,
-                     "Theme exported to %s", theme_export);
+                     "File picker unavailable (install zenity or kdialog)");
         }
     }
-    nk_layout_row_end(ctx);
 
     /* 현재 경로 표시 */
     nk_layout_row_dynamic(ctx, 15, 1);
