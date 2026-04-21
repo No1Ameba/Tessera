@@ -122,6 +122,53 @@
 
 ---
 
+## UX / UI 백로그 (2026-04-21 추가)
+
+### 선택 동작 개선
+12. [ ] **드래그 + 스크롤 시 선택 영역 유지**
+    - 현상: 드래그 중 스크롤이 발생하면 선택 영역이 화면 좌표에 고정되어,
+      스크롤되면서 컨텐츠가 내려가도 "처음 클릭한 글자" 가 아닌 "그 자리에
+      지금 있는 글자" 가 선택 시작점으로 남는다.
+    - 기대: 클릭 시점의 **절대 (스크롤백 포함) 위치**를 앵커로 저장하고,
+      스크롤되어도 해당 글자가 앵커로 따라가도록 한다.
+    - 영향 범위: `src/client/main.c` 의 `g_sel_sc/sr/ec/er` → 절대 행 좌표로 변경.
+      `screen_t.sb_offset / sb_head / sb_count` 활용하여 view ↔ 절대 좌표 변환.
+    - 렌더러(`gl_renderer_draw_cells`) 의 `sel_sc/sr/ec/er` 파라미터는
+      현재 뷰 기준이므로, 호출부에서 변환해 넘긴다.
+
+13. [ ] **더블클릭 = 단어 선택, 트리플클릭 = 라인 선택**
+    - 현재: 드래그만 지원.
+    - 기대: 더블클릭 시 word boundary 로 선택 영역 확장, 트리플클릭 시 해당
+      라인 전체 선택. 선택 영역은 드래그 선택과 동일하게 클립보드 복사 처리.
+    - 영향 범위: `mouse_button_callback` 에 클릭 카운팅 로직 추가
+      (300ms 이내 같은 셀 연속 클릭). word boundary 는
+      `[A-Za-z0-9_]` 연속 vs 공백/기호 경계로 판정.
+
+### 테마 관리
+14. [ ] **샘플 테마 + 드롭다운 선택**
+    - 내장 샘플: VS Code Dark+ / Solarized Dark / Solarized Light /
+      Dracula / Nord / Gruvbox 등 4~6 개.
+    - 설정창 Colors 탭 상단에 Theme 드롭다운. 선택 시 전체 팔레트 교체.
+    - 사용자가 팔레트 셀 하나라도 바꾸면 드롭다운이 자동으로 "Custom" 으로
+      전환 (내장 테마와 한 군데라도 다르면 Custom).
+
+15. [ ] **테마 Import / Export UI**
+    - Export 버튼: 현재 테마를 파일로 저장. 파일 picker 로 경로 지정.
+    - Import 버튼: 파일 picker 로 JSON 테마 로드 후 적용.
+      (기존 Export 텍스트 입력 방식은 파일 picker 로 대체.)
+    - 기존 `theme_save_file` / `theme_load_string` 재사용.
+
+### 파일 picker (공통 인프라)
+16. [ ] **네이티브 파일 선택 다이얼로그**
+    - Nuklear 는 파일 picker 미제공.
+    - 옵션 A: `zenity` / `kdialog` 외부 프로세스 호출
+      (Linux 다수 환경에서 설치되어 있음, popen 으로 경로 문자열 수신).
+    - 옵션 B: `tinyfiledialogs` 라이브러리 임베드 (크로스 플랫폼).
+    - 먼저 옵션 A 로 간단히 구현, 실패(프로그램 없음) 시 텍스트 입력 폴백.
+    - Config Import / Export, Theme Import / Export 에서 공통 사용.
+
+---
+
 ## 테스트 빌드 및 실행 방법
 
 ```bash
