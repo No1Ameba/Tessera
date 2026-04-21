@@ -2,28 +2,26 @@
 
 ## Open
 
-### pane 닫을 때 간헐적 crash 또는 터미널 freeze (2026-04-21)
-
-**증상**: pane 을 닫을 때(Ctrl+W 또는 셸 `exit`) 간헐적으로 다음 중 하나 발생:
-- segfault 로 프로세스가 죽음
-- 프로세스는 살아있지만 터미널이 입력을 받지 않고 멎음
-
-재현이 불규칙적이고, 이전에 수정한 항목들(중복 pane_slot dedupe, layout leaf 다중 제거 루프, `push_layout_to_daemon` 재귀 방지 등)만으로는 완전히 잡히지 않음.
-
-**의심되는 원인 후보**:
-- 동기 IPC 응답 대기 중 dispatch 루프에서 콜백 재진입 (부분 해결은 됐지만 다른 경로가 남아있을 수 있음)
-- daemon 측 race: `pane_destroy` 와 PTY drain 순서
-- GLFW + Nuklear 입력 처리와 IPC poll 타이밍 충돌 (멈추는 경우)
-- 스크롤백 데이터와 선택 영역이 pane 종료 시 동시 접근되는 경로
-
-**다음 진단 단계**:
-- segfault 재현 시 core dump + gdb backtrace 확보
-- freeze 재현 시 SIGQUIT 으로 stack trace (터미널 창이 입력 안 받아도 외부에서 `kill -3 <pid>`)
-- `ipc_client_poll` 의 dispatch 루프에 재진입 감지 플래그 추가 검토
+(현재 없음 — pane close crash/freeze 는 2026-04-21 에 sync RPC async 전환으로 해결 후 재현되지 않음)
 
 ---
 
 ## Resolved
+
+### [FIXED] pane 닫을 때 간헐적 crash 또는 터미널 freeze (2026-04-21)
+
+**증상**: pane 을 닫을 때(Ctrl+W 또는 셸 `exit`) 간헐적으로 segfault 또는 입력 정지.
+
+**원인**: 콜백(`on_pane_exited`) 안에서 sync IPC 호출이 `recv_until` 로 OK 응답을 기다리는 동안, 수신 버퍼에 쌓여있던 다른 메시지(PANE_EXITED, PTY_OUTPUT)가 dispatch 되며 콜백이 재진입. 깊은 재귀 + 전역 상태 스냅샷 불일치 + 드물게 use-after-free 로 이어짐.
+
+**수정**:
+- `ipc_client_window_layout` / `ipc_client_pane_resize` 를 비동기로 전환 (OK 대기 제거). 두 API 모두 UI 가 응답 값을 사용하지 않으므로 안전. 응답은 다음 poll 에서 자연스럽게 소비됨.
+- `dispatch_one` 에 `ipc_msg_header.magic_ver` 검증 추가. 어긋나면 버퍼 비우고 연결 종료 경로로 유도 → garbage payload 가 콜백에 전달되지 않음.
+- `on_pane_exited` 에서 죽는 pane_id 가 `g_sel_pane` 과 같으면 선택 state 전체 초기화 (stale reference 제거).
+
+**영향 파일**: `src/client/ipc_client.c`, `src/client/main.c`.
+
+---
 
 ### [FIXED] pane 닫기 후 영역이 사용 불가 (2026-04-21)
 
