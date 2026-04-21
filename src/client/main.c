@@ -263,6 +263,15 @@ static void on_pane_exited(uint32_t pane_id, void *user)
         }
     }
 
+    /* 죽는 pane 에 선택 영역이 있었으면 초기화 (stale reference 제거) */
+    if (g_sel_pane == pane_id) {
+        g_selecting = 0;
+        g_has_selection = 0;
+        g_sel_sc = g_sel_ec = -1;
+        g_sel_sr_li = g_sel_er_li = -1;
+        g_sel_pane = 0;
+    }
+
     /* 같은 pane_id 를 가진 모든 leaf 제거 (중복 상태 복구) */
     int removed = 0;
     for (;;) {
