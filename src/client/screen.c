@@ -74,6 +74,9 @@ static void scroll_up_n(screen_t *s, int n)
             s->sb_head = (s->sb_head + 1) % s->scrollback_max;
             if (s->sb_count < s->scrollback_max) s->sb_count++;
         }
+        /* scroll_epoch 은 '라이브 스크린 최상단 행이 밀려나간 횟수'이므로
+         * scroll region top == 0 일 때만 증가시킨다 (전체 화면 스크롤). */
+        if (top == 0 && !s->use_alt) s->scroll_epoch += (uint64_t)n;
     }
 
     if (n < region) {
@@ -896,6 +899,32 @@ int screen_mouse_mode(const screen_t *s)       { return s->mouse_mode; }
 int screen_bracketed_paste(const screen_t *s)  { return s->bracketed_paste; }
 int screen_sync_output(const screen_t *s)      { return s->sync_output; }
 const char *screen_get_title(const screen_t *s){ return s->title; }
+
+uint64_t screen_scroll_epoch(const screen_t *s)
+{
+    return s->scroll_epoch;
+}
+
+const term_cell_t *screen_row_by_li(const screen_t *s, uint64_t li)
+{
+    if (!s) return NULL;
+    uint64_t live_top = s->scroll_epoch;
+    /* 라이브 스크린 범위 */
+    if (li >= live_top && li < live_top + (uint64_t)s->rows) {
+        int live_row = (int)(li - live_top);
+        return s->cells + (size_t)live_row * s->cols;
+    }
+    /* 스크롤백 범위: [live_top - sb_count, live_top - 1] */
+    if (s->scrollback && s->sb_count > 0 &&
+        li + (uint64_t)s->sb_count >= live_top && li < live_top)
+    {
+        int sb_logical = (int)(li - (live_top - (uint64_t)s->sb_count));
+        int ring = (s->sb_head - s->sb_count + sb_logical + s->scrollback_max)
+                    % s->scrollback_max;
+        return s->scrollback + (size_t)ring * s->cols;
+    }
+    return NULL;
+}
 
 void screen_set_clipboard_cb(screen_t *s,
                               void (*cb)(const char *text, void *user),

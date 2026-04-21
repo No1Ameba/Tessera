@@ -348,11 +348,13 @@ static int ensure_glyph(gl_renderer_t *r, uint32_t cp, atlas_glyph_t *out)
 }
 
 /* 셀 (col,row)가 선택 범위 안에 있는지 판정.
- * 좌표는 정규화된 상태 (r0 <= r1). */
+ * sr/er 은 "이 프레임에서의 view row" 로, 뷰포트 바깥(음수 또는 rows 이상)
+ * 으로 넘어갈 수 있다 (스크롤로 일부가 가려진 경우). col/row 는 pane-local.
+ * 선택 없음은 sc == -1 로 sentinel. */
 static int cell_in_selection(int col, int row,
                               int sc, int sr, int ec, int er)
 {
-    if (sr < 0) return 0;
+    if (sc < 0 || ec < 0) return 0;
     /* 정규화: r0 <= r1 */
     int r0, c0, r1, c1;
     if (sr < er || (sr == er && sc <= ec)) {
