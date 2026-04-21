@@ -223,6 +223,47 @@ static void tab_window(struct nk_context *ctx, termemu_config_t *cfg)
     nk_layout_row_push(ctx, 0.7f);
     nk_property_int(ctx, "#py", 0, &cfg->padding_y, 32, 1, 1);
     nk_layout_row_end(ctx);
+
+    nk_layout_row_dynamic(ctx, 8, 1);
+    nk_spacing(ctx, 1);
+
+    /* ── Cursor style / blink ─────────────────────────────────────────── */
+    static const char *cursor_labels[] = {
+        "Block", "Hollow Block", "Bar", "Underline"
+    };
+    /* cfg->cursor_style 값: BLOCK=1, UNDERLINE=2, BAR=3, BLOCK_HOLLOW=4
+     * 표시 순서: Block(1)=0, Hollow(4)=1, Bar(3)=2, Underline(2)=3 */
+    int cur_idx = 0;
+    switch (cfg->cursor_style) {
+    case CURSOR_BLOCK:        cur_idx = 0; break;
+    case CURSOR_BLOCK_HOLLOW: cur_idx = 1; break;
+    case CURSOR_BAR:          cur_idx = 2; break;
+    case CURSOR_UNDERLINE:    cur_idx = 3; break;
+    }
+
+    nk_layout_row_begin(ctx, NK_DYNAMIC, 30, 2);
+    nk_layout_row_push(ctx, 0.3f);
+    nk_label(ctx, "Cursor Style:", NK_TEXT_LEFT);
+    nk_layout_row_push(ctx, 0.7f);
+    int new_idx = nk_combo(ctx, cursor_labels, 4, cur_idx, 25, nk_vec2(200, 160));
+    if (new_idx != cur_idx) {
+        switch (new_idx) {
+        case 0: cfg->cursor_style = CURSOR_BLOCK;        break;
+        case 1: cfg->cursor_style = CURSOR_BLOCK_HOLLOW; break;
+        case 2: cfg->cursor_style = CURSOR_BAR;          break;
+        case 3: cfg->cursor_style = CURSOR_UNDERLINE;    break;
+        }
+    }
+    nk_layout_row_end(ctx);
+
+    nk_layout_row_begin(ctx, NK_DYNAMIC, 30, 2);
+    nk_layout_row_push(ctx, 0.3f);
+    nk_label(ctx, "Cursor Blink:", NK_TEXT_LEFT);
+    nk_layout_row_push(ctx, 0.7f);
+    int blink = cfg->cursor_blink ? 1 : 0;
+    nk_checkbox_label(ctx, blink ? "On" : "Off", &blink);
+    cfg->cursor_blink = blink ? true : false;
+    nk_layout_row_end(ctx);
 }
 
 static void tab_keybindings(struct nk_context *ctx, termemu_config_t *cfg)
@@ -238,6 +279,12 @@ static void tab_keybindings(struct nk_context *ctx, termemu_config_t *cfg)
     keybind_row(ctx, "Scroll Up:",        kb->scroll_up,        sizeof(kb->scroll_up));
     keybind_row(ctx, "Scroll Down:",      kb->scroll_down,      sizeof(kb->scroll_down));
     keybind_row(ctx, "Preferences:",      kb->preferences,      sizeof(kb->preferences));
+    keybind_row(ctx, "Copy:",             kb->copy,             sizeof(kb->copy));
+    keybind_row(ctx, "Paste:",            kb->paste,            sizeof(kb->paste));
+    keybind_row(ctx, "Resize Left:",      kb->resize_left,      sizeof(kb->resize_left));
+    keybind_row(ctx, "Resize Right:",     kb->resize_right,     sizeof(kb->resize_right));
+    keybind_row(ctx, "Resize Up:",        kb->resize_up,        sizeof(kb->resize_up));
+    keybind_row(ctx, "Resize Down:",      kb->resize_down,      sizeof(kb->resize_down));
 }
 
 static void tab_colors(struct nk_context *ctx, termemu_theme_t *theme)

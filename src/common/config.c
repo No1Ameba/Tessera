@@ -183,6 +183,12 @@ void config_defaults(termemu_config_t *cfg) {
     strncpy(kb->scroll_up,        "Shift+Prior", sizeof(kb->scroll_up) - 1);
     strncpy(kb->scroll_down,      "Shift+Next",  sizeof(kb->scroll_down) - 1);
     strncpy(kb->preferences,      "Ctrl+comma",  sizeof(kb->preferences) - 1);
+    strncpy(kb->copy,             "Ctrl+Shift+c", sizeof(kb->copy) - 1);
+    strncpy(kb->paste,            "Ctrl+Shift+v", sizeof(kb->paste) - 1);
+    strncpy(kb->resize_left,      "Alt+Shift+h",  sizeof(kb->resize_left) - 1);
+    strncpy(kb->resize_right,     "Alt+Shift+l",  sizeof(kb->resize_right) - 1);
+    strncpy(kb->resize_up,        "Alt+Shift+k",  sizeof(kb->resize_up) - 1);
+    strncpy(kb->resize_down,      "Alt+Shift+j",  sizeof(kb->resize_down) - 1);
 }
 
 /* ─── 설정 파싱 ─────────────────────────────────────────────────────────── */
@@ -309,6 +315,12 @@ bool config_load_string(const char *json, termemu_config_t *cfg) {
         PARSE_KB("scroll_up",        scroll_up)
         PARSE_KB("scroll_down",      scroll_down)
         PARSE_KB("preferences",      preferences)
+        PARSE_KB("copy",             copy)
+        PARSE_KB("paste",            paste)
+        PARSE_KB("resize_left",      resize_left)
+        PARSE_KB("resize_right",     resize_right)
+        PARSE_KB("resize_up",        resize_up)
+        PARSE_KB("resize_down",      resize_down)
 #undef PARSE_KB
     }
 
@@ -378,6 +390,12 @@ bool config_save_file(const char *path, const termemu_config_t *cfg) {
     cJSON_AddStringToObject(keybindings, "scroll_up",        kb->scroll_up);
     cJSON_AddStringToObject(keybindings, "scroll_down",      kb->scroll_down);
     cJSON_AddStringToObject(keybindings, "preferences",      kb->preferences);
+    cJSON_AddStringToObject(keybindings, "copy",             kb->copy);
+    cJSON_AddStringToObject(keybindings, "paste",            kb->paste);
+    cJSON_AddStringToObject(keybindings, "resize_left",      kb->resize_left);
+    cJSON_AddStringToObject(keybindings, "resize_right",     kb->resize_right);
+    cJSON_AddStringToObject(keybindings, "resize_up",        kb->resize_up);
+    cJSON_AddStringToObject(keybindings, "resize_down",      kb->resize_down);
     cJSON_AddItemToObject(root, "keybindings", keybindings);
 
     char *text = cJSON_Print(root);

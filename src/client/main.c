@@ -20,6 +20,7 @@
 
 #ifndef _WIN32
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #endif
@@ -58,6 +59,10 @@ typedef struct {
 
 static pane_slot_t g_panes[MAX_PANES];
 
+typedef struct { ipc_client_t *c; uint32_t sid; uint32_t wid;
+                 int fw; int fh; } resize_ctx_t;
+static void resize_leaf_cb(layout_node_t *leaf, void *user);
+
 static pane_slot_t *pane_slot_find(uint32_t pane_id)
 {
     for (int i = 0; i < MAX_PANES; i++)
@@ -68,11 +73,17 @@ static pane_slot_t *pane_slot_find(uint32_t pane_id)
 
 static pane_slot_t *pane_slot_alloc(uint32_t pane_id, int cols, int rows)
 {
+    /* 같은 pane_id 가 이미 있으면 재사용 — 중복 할당 방지 */
+    pane_slot_t *existing = pane_slot_find(pane_id);
+    if (existing) return existing;
+
+    extern int g_scrollback_lines;  /* 아래 전역 선언 */
+    int sb = g_scrollback_lines > 0 ? g_scrollback_lines : 1000;
     for (int i = 0; i < MAX_PANES; i++) {
         if (!g_panes[i].used) {
             g_panes[i].pane_id = pane_id;
             g_panes[i].used    = 1;
-            screen_init(&g_panes[i].screen, cols, rows, 1000);
+            screen_init(&g_panes[i].screen, cols, rows, sb);
             return &g_panes[i];
         }
     }
@@ -101,6 +112,8 @@ static layout_node_t *g_layout        = NULL;
 
 static ipc_client_t  *g_client        = NULL;
 static font_face_t   *g_font          = NULL;
+static glyph_atlas_t *g_atlas         = NULL;
+int                   g_scrollback_lines = 1000;
 static GLFWwindow    *g_window        = NULL;
 static gl_renderer_t *g_renderer      = NULL;
 
@@ -169,6 +182,9 @@ static void on_pty_output(uint32_t pane_id, const uint8_t *data, size_t len,
     }
 }
 
+static void push_layout_to_daemon(void);
+static void compute_layout_rect(int *x, int *y, int *w, int *h);
+
 static void on_pane_exited(uint32_t pane_id, void *user)
 {
     (void)user;
@@ -182,11 +198,95 @@ static void on_pane_exited(uint32_t pane_id, void *user)
         }
     }
 
-    layout_node_t *node = layout_find_pane(g_layout, pane_id);
-    if (node) layout_remove(&g_layout, node);
+    /* 같은 pane_id 를 가진 모든 leaf 제거 (중복 상태 복구) */
+    int removed = 0;
+    for (;;) {
+        layout_node_t *node = layout_find_pane(g_layout, pane_id);
+        if (!node) break;
+        layout_remove(&g_layout, node);
+        removed++;
+        if (!g_layout) break;
+        if (removed > 16) break;  /* 안전망 */
+    }
+
+    /* pane_slot 도 함께 정리. slot 이 실제로 존재해서 free 됐는지 여부를 반환받는다. */
+    pane_slot_t *slot_before = pane_slot_find(pane_id);
+    int slot_freed = slot_before != NULL;
     pane_slot_free(pane_id);
 
-    if (!g_layout) g_running = 0;
+    /* 이번 이벤트가 실제로 상태를 바꿨을 때만 daemon 에 새 layout 을 전송한다.
+     * 이벤트와 무관한 pane_id (우리가 모르는 pane) 에 대해 push 를 보내면
+     * daemon 과의 재전송 루프를 유발할 수 있다. */
+    int changed = (removed > 0) || slot_freed;
+
+    if (g_layout) {
+        if (changed) {
+            int fw = font_cell_width(g_font);
+            int fh = font_cell_height(g_font);
+            resize_ctx_t rctx = { g_client, g_session_id, g_window_id, fw, fh };
+            layout_each_leaf(g_layout, resize_leaf_cb, &rctx);
+        }
+    } else {
+        g_running = 0;
+    }
+    g_dirty = 1;
+    if (changed) push_layout_to_daemon();
+}
+
+/* 현재 layout tree 를 직렬화해서 데몬에 업로드한다 (재접속 복원용). */
+static void push_layout_to_daemon(void)
+{
+    if (!g_client || !g_layout || g_session_id == 0 || g_window_id == 0) return;
+    uint8_t blob[4096];
+    int n = layout_serialize(g_layout, blob, sizeof blob);
+    if (n < 0) return;
+    ipc_client_window_layout(g_client, g_session_id, g_window_id,
+                              blob, (uint16_t)n);
+}
+
+/* 다른 클라이언트의 split을 우리 layout 트리에 반영 */
+static void on_pane_split(uint32_t session_id, uint32_t window_id,
+                           uint32_t parent_pane_id, uint32_t new_pane_id,
+                           uint16_t cols, uint16_t rows,
+                           uint8_t direction, float ratio,
+                           void *user)
+{
+    (void)user; (void)cols; (void)rows;
+
+    if (session_id != g_session_id || window_id != g_window_id) return;
+    if (!g_layout) return;
+    if (pane_slot_find(new_pane_id)) return;  /* 이미 처리됨 */
+
+    layout_node_t *parent_leaf = layout_find_pane(g_layout, parent_pane_id);
+    if (!parent_leaf) return;
+
+    layout_node_type_t dir = (direction == 1) ? LAYOUT_SPLIT_V : LAYOUT_SPLIT_H;
+    if (ratio <= 0.0f || ratio >= 1.0f) ratio = 0.5f;
+
+    layout_node_t *new_leaf = layout_split(parent_leaf, dir, ratio, new_pane_id);
+    if (!new_leaf) return;
+
+    layout_node_t *r = parent_leaf;
+    while (r->parent) r = r->parent;
+    g_layout = r;
+
+    int fw = font_cell_width(g_font);
+    int fh = font_cell_height(g_font);
+    int new_nc = new_leaf->rect.w / fw; if (new_nc < 1) new_nc = 1;
+    int new_nr = new_leaf->rect.h / fh; if (new_nr < 1) new_nr = 1;
+
+    pane_slot_t *ns = pane_slot_alloc(new_pane_id, new_nc, new_nr);
+    if (ns) {
+        if (g_theme) screen_apply_theme(&ns->screen, g_theme);
+        screen_set_clipboard_cb(&ns->screen, on_clipboard_set, NULL);
+    }
+
+    /* 부모 pane의 클라이언트 측 screen도 새로운 크기로 리사이즈 */
+    int par_nc = parent_leaf->rect.w / fw; if (par_nc < 1) par_nc = 1;
+    int par_nr = parent_leaf->rect.h / fh; if (par_nr < 1) par_nr = 1;
+    pane_slot_t *par_slot = pane_slot_find(parent_pane_id);
+    if (par_slot) screen_resize(&par_slot->screen, par_nc, par_nr);
+
     g_dirty = 1;
 }
 
@@ -253,8 +353,11 @@ static void do_split(layout_node_type_t dir)
     int nr = new_h / fh; if (nr < 1) nr = 1;
 
     uint32_t new_pane_id = 0;
-    if (ipc_client_pane_create(g_client, g_session_id, g_window_id,
-                                (uint16_t)nc, (uint16_t)nr, &new_pane_id) != 0)
+    uint8_t  notify_dir  = (dir == LAYOUT_SPLIT_V) ? 1 : 0;
+    if (ipc_client_pane_create_split(g_client, g_session_id, g_window_id,
+                                      (uint16_t)nc, (uint16_t)nr,
+                                      g_active_pane, notify_dir, 0.5f,
+                                      &new_pane_id) != 0)
         return;
 
     layout_node_t *new_leaf = layout_split(cur_leaf, dir, 0.5f, new_pane_id);
@@ -287,6 +390,7 @@ static void do_split(layout_node_type_t dir)
     }
     g_active_pane = new_pane_id;
     g_dirty = 1;
+    push_layout_to_daemon();
 }
 
 static void do_close_pane(void)
@@ -305,15 +409,120 @@ static void do_close_pane(void)
     }
 
     ipc_client_pane_destroy(g_client, g_session_id, g_window_id, g_active_pane);
-    layout_remove(&g_layout, node);
-    pane_slot_free(g_active_pane);
+    /* 같은 pane_id 를 가진 모든 leaf 제거 (중복 상태 복구) */
+    uint32_t closing_id = g_active_pane;
+    for (;;) {
+        layout_node_t *n = layout_find_pane(g_layout, closing_id);
+        if (!n) break;
+        layout_remove(&g_layout, n);
+        if (!g_layout) break;
+    }
+    pane_slot_free(closing_id);
+    (void)node;
 
     if (next_pane) {
         g_active_pane = next_pane;
+        int fw = font_cell_width(g_font);
+        int fh = font_cell_height(g_font);
+        resize_ctx_t rctx = { g_client, g_session_id, g_window_id, fw, fh };
+        layout_each_leaf(g_layout, resize_leaf_cb, &rctx);
     } else {
         g_running = 0;
     }
     g_dirty = 1;
+    push_layout_to_daemon();
+}
+
+/* ── Copy / Paste / Resize ──────────────────────────────────────────────── */
+
+static char *selection_to_text(const screen_t *scr,
+                                int sc, int sr, int ec, int er);
+
+static void do_copy_selection(void)
+{
+    if (!g_has_selection) return;
+    pane_slot_t *ss = pane_slot_find(g_sel_pane);
+    if (!ss) return;
+    char *text = selection_to_text(&ss->screen,
+                                     g_sel_sc, g_sel_sr, g_sel_ec, g_sel_er);
+    if (text) {
+        glfwSetClipboardString(g_window, text);
+        free(text);
+    }
+}
+
+static void do_paste_clipboard(void)
+{
+    const char *clip = glfwGetClipboardString(g_window);
+    if (!clip) return;
+    pane_slot_t *s = pane_slot_find(g_active_pane);
+    if (!s) return;
+    int bracketed = screen_bracketed_paste(&s->screen);
+    if (bracketed)
+        ipc_client_pty_input(g_client, g_active_pane,
+                              (const uint8_t*)"\x1b[200~", 6);
+    ipc_client_pty_input(g_client, g_active_pane,
+                          (const uint8_t*)clip, strlen(clip));
+    if (bracketed)
+        ipc_client_pty_input(g_client, g_active_pane,
+                              (const uint8_t*)"\x1b[201~", 6);
+}
+
+/* dir: 0=left(H), 1=right(L), 2=down(J), 3=up(K)
+ * 활성 pane 위치와 무관하게 경계선을 해당 방향으로 이동. */
+static void do_resize_pane(int dir)
+{
+    if (!g_layout) return;
+    layout_node_t *leaf = layout_find_pane(g_layout, g_active_pane);
+    if (!leaf) return;
+
+    layout_node_type_t want = (dir < 2) ? LAYOUT_SPLIT_H : LAYOUT_SPLIT_V;
+    int positive = (dir == 1 || dir == 2);  /* right / down */
+
+    layout_node_t *anc = leaf->parent;
+    while (anc && anc->type != want) anc = anc->parent;
+    if (!anc) return;
+
+    float delta = 0.03f;
+    float r     = anc->split_ratio + (positive ? delta : -delta);
+    if (r < 0.05f) r = 0.05f;
+    if (r > 0.95f) r = 0.95f;
+    if (r == anc->split_ratio) return;
+    anc->split_ratio = r;
+
+    layout_resize_root(g_layout,
+                        g_layout->rect.x, g_layout->rect.y,
+                        g_layout->rect.w, g_layout->rect.h);
+
+    int fw = font_cell_width(g_font);
+    int fh = font_cell_height(g_font);
+    resize_ctx_t rctx = { g_client, g_session_id, g_window_id, fw, fh };
+    layout_each_leaf(g_layout, resize_leaf_cb, &rctx);
+
+    push_layout_to_daemon();
+    g_dirty = 1;
+}
+
+/* URL 을 OS 기본 핸들러로 연다 (Linux: xdg-open, macOS: open). 비차단. */
+static void open_url(const char *url)
+{
+    if (!url || !*url) return;
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, 0); dup2(devnull, 1); dup2(devnull, 2);
+            close(devnull);
+        }
+#ifdef __APPLE__
+        execlp("open", "open", url, (char*)NULL);
+#else
+        execlp("xdg-open", "xdg-open", url, (char*)NULL);
+#endif
+        _exit(127);
+    }
+    /* SIGCHLD는 부모의 기존 핸들러가 reap (없으면 좀비; 짧은 수명이므로 OK) */
 }
 
 /* ── Focus navigation ────────────────────────────────────────────────────── */
@@ -481,8 +690,21 @@ static void render_leaf_cb(layout_node_t *leaf, void *user)
         screen_scrollback_offset(&slot->screen) == 0)
     {
         int style = screen_cursor_style(&slot->screen);
-        /* 블링크 스타일(홀수: 1,3,5)이면 blink_on에 따라 토글 */
-        int is_blink = (style == 1 || style == 3 || style == 5);
+        /* DECSCUSR 미설정(0)이면 config 설정을 사용.
+         * 렌더러 스타일 인코딩:
+         *   0/1/2 = solid block, 3/4 = underline, 5/6 = bar,
+         *   7/8   = hollow block (blink/solid)
+         *   홀수 = blink, 짝수 = solid */
+        if (style == 0 && g_cfg_ptr) {
+            int blink = g_cfg_ptr->cursor_blink;
+            switch (g_cfg_ptr->cursor_style) {
+            case CURSOR_BLOCK:        style = blink ? 1 : 2; break;
+            case CURSOR_UNDERLINE:    style = blink ? 3 : 4; break;
+            case CURSOR_BAR:          style = blink ? 5 : 6; break;
+            case CURSOR_BLOCK_HOLLOW: style = blink ? 7 : 8; break;
+            }
+        }
+        int is_blink = (style == 1 || style == 3 || style == 5 || style == 7);
         int vis = (!is_blink || ctx->blink_on) ? 1 : 0;
 
         /* 커서 색: 전경색 기본 */
@@ -491,6 +713,8 @@ static void render_leaf_cb(layout_node_t *leaf, void *user)
         float cb = slot->screen.default_fg_b / 255.0f;
 
         gl_renderer_draw_cursor(ctx->render,
+                                 screen_get_cells(&slot->screen),
+                                 slot->screen.cols,
                                  screen_cursor_x(&slot->screen),
                                  screen_cursor_y(&slot->screen),
                                  style, vis, cr, cg, cb, prect);
@@ -499,22 +723,59 @@ static void render_leaf_cb(layout_node_t *leaf, void *user)
 
 /* ── Resize all panes ────────────────────────────────────────────────────── */
 
-typedef struct { ipc_client_t *c; uint32_t sid; uint32_t wid;
-                 int fw; int fh; } resize_ctx_t;
+/* blob 에서 복원한 트리 중 실제 존재하지 않는 pane 을 제거한다.
+ * (데몬이 블롭을 업데이트하지 않은 상태에서 셸이 죽은 경우 등.) */
+static int pane_in_list(uint32_t pid, const ipc_attach_pane_info_t *panes, int n) {
+    for (int i = 0; i < n; i++) if (panes[i].pane_id == pid) return 1;
+    return 0;
+}
 
-static void resize_leaf_cb(layout_node_t *leaf, void *user);
+static void prune_dead_leaves(layout_node_t **root,
+                               const ipc_attach_pane_info_t *panes, int n)
+{
+    if (!*root) return;
+    /* leaf 를 수집 (트리 변형 중 안전) */
+    uint32_t dead[64];
+    int dead_n = 0;
+    /* 재귀 수집 */
+    layout_node_t *stack[128];
+    int top = 0;
+    stack[top++] = *root;
+    while (top > 0 && dead_n < 64) {
+        layout_node_t *node = stack[--top];
+        if (!node) continue;
+        if (node->type == LAYOUT_LEAF) {
+            if (!pane_in_list(node->pane_id, panes, n))
+                dead[dead_n++] = node->pane_id;
+        } else {
+            if (top < 126) {
+                stack[top++] = node->children[0];
+                stack[top++] = node->children[1];
+            }
+        }
+    }
+    for (int i = 0; i < dead_n; i++) {
+        layout_node_t *leaf = layout_find_pane(*root, dead[i]);
+        if (leaf) layout_remove(root, leaf);
+    }
+}
 
 /* 세션 attach: 기존 세션에 연결 + pane_slot + layout 생성 */
 static void session_attach_setup(uint32_t sid, int cols, int rows, int fw, int fh)
 {
     ipc_attach_pane_info_t panes[64];
     int pane_count = 0;
-    if (ipc_client_session_attach(g_client, sid, panes, 64, &pane_count) != 0) {
+    uint8_t blob[4096];
+    uint16_t blob_len = 0;
+    if (ipc_client_session_attach_ex(g_client, sid, panes, 64, &pane_count,
+                                      blob, sizeof blob, &blob_len) != 0) {
         fprintf(stderr, "Failed to attach to session\n");
         return;
     }
     g_session_id = sid;
     if (pane_count > 0) g_window_id = panes[0].window_id;
+
+    /* 1) pane_slot 생성 (모든 pane 에 대해) */
     for (int i = 0; i < pane_count; i++) {
         pane_slot_t *ps = pane_slot_alloc(panes[i].pane_id,
                                            panes[i].cols, panes[i].rows);
@@ -522,12 +783,20 @@ static void session_attach_setup(uint32_t sid, int cols, int rows, int fw, int f
             screen_apply_theme(&ps->screen, g_theme);
             screen_set_clipboard_cb(&ps->screen, on_clipboard_set, NULL);
         }
-        if (i == 0) {
-            g_active_pane = panes[i].pane_id;
-            g_layout = layout_create_leaf(panes[i].pane_id, 0, 0,
-                                           g_win_w, g_win_h);
-        } else if (g_layout) {
-            layout_node_t *cur = layout_find_pane(g_layout, g_active_pane);
+    }
+
+    /* 2) layout 트리 복원: blob 있으면 deserialize, 없으면 flat split fallback */
+    g_layout = NULL;
+    if (blob_len > 0) {
+        g_layout = layout_deserialize(blob, blob_len);
+        if (g_layout) prune_dead_leaves(&g_layout, panes, pane_count);
+    }
+    if (!g_layout && pane_count > 0) {
+        int lx, ly, lw, lh;
+        compute_layout_rect(&lx, &ly, &lw, &lh);
+        g_layout = layout_create_leaf(panes[0].pane_id, lx, ly, lw, lh);
+        for (int i = 1; i < pane_count; i++) {
+            layout_node_t *cur = layout_find_pane(g_layout, panes[i-1].pane_id);
             if (cur) {
                 layout_split(cur, LAYOUT_SPLIT_H, 0.5f, panes[i].pane_id);
                 layout_node_t *r = cur;
@@ -536,13 +805,20 @@ static void session_attach_setup(uint32_t sid, int cols, int rows, int fw, int f
             }
         }
     }
+    if (pane_count > 0) g_active_pane = panes[0].pane_id;
+
     if (g_layout) {
-        layout_resize_root(g_layout, 0, 0, g_win_w, g_win_h);
+        int lx, ly, lw, lh;
+        compute_layout_rect(&lx, &ly, &lw, &lh);
+        layout_resize_root(g_layout, lx, ly, lw, lh);
         resize_ctx_t rctx = { g_client, g_session_id, g_window_id, fw, fh };
         layout_each_leaf(g_layout, resize_leaf_cb, &rctx);
     }
     for (int i = 0; i < pane_count; i++)
         ipc_client_pane_replay(g_client, panes[i].pane_id);
+
+    /* 데몬 blob 동기화 (죽은 leaf 가 제거되었을 수 있음) */
+    push_layout_to_daemon();
     (void)cols; (void)rows;
 }
 
@@ -561,7 +837,10 @@ static void session_new_setup(const char *name, int cols, int rows)
         screen_set_clipboard_cb(&first_slot->screen, on_clipboard_set, NULL);
     }
     g_active_pane = first_pane;
-    g_layout = layout_create_leaf(first_pane, 0, 0, g_win_w, g_win_h);
+    int lx, ly, lw, lh;
+    compute_layout_rect(&lx, &ly, &lw, &lh);
+    g_layout = layout_create_leaf(first_pane, lx, ly, lw, lh);
+    push_layout_to_daemon();
 }
 
 static void resize_leaf_cb(layout_node_t *leaf, void *user)
@@ -607,6 +886,16 @@ static void key_callback(GLFWwindow *win, int key, int scancode,
 
     unsigned int mod_flags = input_glfw_mods(mods);
 
+    /* ── 상시 alias (Ctrl+Insert / Shift+Insert for copy/paste) ── */
+    if (!g_show_settings) {
+        if (mod_flags == INPUT_MOD_CTRL  && key == GLFW_KEY_INSERT) {
+            do_copy_selection();  g_key_consumed = 1; return;
+        }
+        if (mod_flags == INPUT_MOD_SHIFT && key == GLFW_KEY_INSERT) {
+            do_paste_clipboard(); g_key_consumed = 1; return;
+        }
+    }
+
     /* ── 설정 토글 ── */
     if (g_cfg_ptr) {
         const keybindings_t *kb = &g_cfg_ptr->keybindings;
@@ -641,6 +930,18 @@ static void key_callback(GLFWwindow *win, int key, int scancode,
             { do_focus(3); g_key_consumed = 1; return; }
         if (keybind_matches(kb->close_pane,       mod_flags, key))
             { do_close_pane(); g_key_consumed = 1; return; }
+        if (keybind_matches(kb->copy,             mod_flags, key))
+            { do_copy_selection(); g_key_consumed = 1; return; }
+        if (keybind_matches(kb->paste,            mod_flags, key))
+            { do_paste_clipboard(); g_key_consumed = 1; return; }
+        if (keybind_matches(kb->resize_left,      mod_flags, key))
+            { do_resize_pane(0); g_key_consumed = 1; return; }
+        if (keybind_matches(kb->resize_right,     mod_flags, key))
+            { do_resize_pane(1); g_key_consumed = 1; return; }
+        if (keybind_matches(kb->resize_down,      mod_flags, key))
+            { do_resize_pane(2); g_key_consumed = 1; return; }
+        if (keybind_matches(kb->resize_up,        mod_flags, key))
+            { do_resize_pane(3); g_key_consumed = 1; return; }
 
         if (as) {
             if (keybind_matches(kb->scroll_up,   mod_flags, key)) {
@@ -716,8 +1017,15 @@ static void mouse_button_callback(GLFWwindow *win, int button, int action,
     int mode_pre = active_slot_pre ? screen_mouse_mode(&active_slot_pre->screen) : 0;
     if (press && button == GLFW_MOUSE_BUTTON_RIGHT && mode_pre == SCREEN_MOUSE_NONE) {
         g_show_context_menu = 1;
-        g_context_menu_x = (float)mx;
-        g_context_menu_y = (float)my;
+        /* 창 가장자리에 걸려 가려지지 않도록 flip/clamp. 메뉴 크기 = 180x250. */
+        const float mw = 180.0f, mh = 250.0f;
+        float x = (float)mx, y = (float)my;
+        if (x + mw > (float)g_win_w) x -= mw;          /* 오른쪽 모서리 → 왼쪽으로 */
+        if (y + mh > (float)g_win_h) y -= mh;          /* 아래쪽 모서리 → 위로   */
+        if (x < 0) x = 0;
+        if (y < 0) y = 0;
+        g_context_menu_x = x;
+        g_context_menu_y = y;
         g_dirty = 1;
         nk_impl_reset_input();
         return;
@@ -734,6 +1042,27 @@ static void mouse_button_callback(GLFWwindow *win, int button, int action,
     int mode = active_slot ? screen_mouse_mode(&active_slot->screen) : 0;
     int cell_x = (int)mx / fw;  /* 0-based */
     int cell_y = (int)my / fh;
+
+    /* Ctrl + 좌클릭 누름 → OSC 8 하이퍼링크 열기 (선택/마우스 모드보다 우선).
+     * 링크 조회는 pane 로컬 좌표가 필요하므로 leaf rect 로 보정. */
+    if (press && button == GLFW_MOUSE_BUTTON_LEFT &&
+        (mod_flags & INPUT_MOD_CTRL) && active_slot && g_layout) {
+        layout_node_t *leaf = layout_find_pane(g_layout, g_active_pane);
+        if (leaf) {
+            int lx = ((int)mx - leaf->rect.x) / fw;
+            int ly = ((int)my - leaf->rect.y) / fh;
+            if (lx >= 0 && ly >= 0 &&
+                lx < active_slot->screen.cols &&
+                ly < active_slot->screen.rows) {
+                const term_cell_t *cells = screen_get_cells(&active_slot->screen);
+                uint16_t lid = cells[ly * active_slot->screen.cols + lx].link_id;
+                if (lid) {
+                    const char *url = screen_link_url(&active_slot->screen, lid);
+                    if (url) { open_url(url); return; }
+                }
+            }
+        }
+    }
 
     if (mode != SCREEN_MOUSE_NONE) {
         /* 마우스 모드: PTY에 전달 (1-based) */
@@ -850,11 +1179,15 @@ static void framebuffer_size_callback(GLFWwindow *win, int width, int height)
     g_win_w = width;
     g_win_h = height;
     gl_renderer_resize(g_renderer, g_win_w, g_win_h);
-    layout_resize_root(g_layout, 0, 0, g_win_w, g_win_h);
-    int fw = font_cell_width(g_font);
-    int fh = font_cell_height(g_font);
-    resize_ctx_t rctx = { g_client, g_session_id, g_window_id, fw, fh };
-    layout_each_leaf(g_layout, resize_leaf_cb, &rctx);
+    if (g_layout) {
+        int lx, ly, lw, lh;
+        compute_layout_rect(&lx, &ly, &lw, &lh);
+        layout_resize_root(g_layout, lx, ly, lw, lh);
+        int fw = font_cell_width(g_font);
+        int fh = font_cell_height(g_font);
+        resize_ctx_t rctx = { g_client, g_session_id, g_window_id, fw, fh };
+        layout_each_leaf(g_layout, resize_leaf_cb, &rctx);
+    }
     g_dirty = 1;
 }
 
@@ -866,6 +1199,24 @@ static void glfw_error_callback(int error, const char *description)
 }
 
 /* ── Config reload ───────────────────────────────────────────────────────── */
+
+/* 현재 설정의 패딩을 반영한 레이아웃 루트 영역을 반환한다. */
+static void compute_layout_rect(int *x, int *y, int *w, int *h)
+{
+    int px = g_cfg_ptr ? g_cfg_ptr->padding_x : 0;
+    int py = g_cfg_ptr ? g_cfg_ptr->padding_y : 0;
+    *x = px; *y = py;
+    *w = g_win_w - 2 * px;
+    *h = g_win_h - 2 * py;
+    if (*w < 1) *w = 1;
+    if (*h < 1) *h = 1;
+}
+
+/* 현재 적용된 폰트/패딩 기억 (hot-reload 시 변경 여부 판별). */
+static char  g_applied_font_family[256] = {0};
+static float g_applied_font_size        = 0.0f;
+static int   g_applied_padding_x        = 0;
+static int   g_applied_padding_y        = 0;
 
 static void do_config_reload(void)
 {
@@ -894,6 +1245,57 @@ static void do_config_reload(void)
     }
 
     gl_renderer_set_opacity(g_renderer, g_cfg_ptr->opacity);
+
+    /* scrollback_lines 는 새로 생성되는 pane 에만 적용 (기존 화면은 유지). */
+    if (g_cfg_ptr->scrollback_lines > 0)
+        g_scrollback_lines = g_cfg_ptr->scrollback_lines;
+
+    /* ── 폰트 핫 리로드: family 또는 size 변경 시 ────────────────────────── */
+    const char *new_family = g_cfg_ptr->font_family[0] ? g_cfg_ptr->font_family
+                                                         : "monospace";
+    float new_size = g_cfg_ptr->font_size > 0.0f ? g_cfg_ptr->font_size : 12.0f;
+    int font_changed = (strcmp(new_family, g_applied_font_family) != 0) ||
+                        (new_size != g_applied_font_size);
+    if (font_changed) {
+        char resolved[512] = {0};
+        const char *font_path = resolve_font_path(new_family, resolved,
+                                                   sizeof resolved);
+        font_face_t *new_font = font_face_load(font_path, new_size, 96);
+        if (new_font) {
+            glyph_atlas_t *new_atlas = glyph_atlas_create(1024, 1024);
+            if (new_atlas) {
+                gl_renderer_set_font(g_renderer, new_font, new_atlas);
+                /* 이전 자원 해제 (renderer 는 이제 새 포인터 사용) */
+                glyph_atlas_destroy(g_atlas);
+                font_face_destroy(g_font);
+                g_atlas = new_atlas;
+                g_font  = new_font;
+                strncpy(g_applied_font_family, new_family,
+                        sizeof g_applied_font_family - 1);
+                g_applied_font_size = new_size;
+            } else {
+                font_face_destroy(new_font);
+            }
+        }
+    }
+
+    /* ── 패딩 변경 시 layout 재배치 ─────────────────────────────────────── */
+    int padding_changed = (g_cfg_ptr->padding_x != g_applied_padding_x) ||
+                           (g_cfg_ptr->padding_y != g_applied_padding_y);
+    if (font_changed || padding_changed) {
+        if (g_layout) {
+            int lx, ly, lw, lh;
+            compute_layout_rect(&lx, &ly, &lw, &lh);
+            layout_resize_root(g_layout, lx, ly, lw, lh);
+            int fw = font_cell_width(g_font);
+            int fh = font_cell_height(g_font);
+            resize_ctx_t rctx = { g_client, g_session_id, g_window_id, fw, fh };
+            layout_each_leaf(g_layout, resize_leaf_cb, &rctx);
+        }
+        g_applied_padding_x = g_cfg_ptr->padding_x;
+        g_applied_padding_y = g_cfg_ptr->padding_y;
+    }
+
     g_dirty = 1;
 }
 
@@ -973,9 +1375,11 @@ int main(int argc, char *argv[])
     g_theme = &theme;
     g_cfg_ptr = &cfg;
     g_theme_mut_ptr = &theme;
+    if (cfg.scrollback_lines > 0) g_scrollback_lines = cfg.scrollback_lines;
 
 #ifndef _WIN32
     signal(SIGHUP, sighup_handler);
+    signal(SIGPIPE, SIG_IGN);  /* daemon 소켓 끊김 시 kill 방지 */
 #endif
 
     /* ── GLFW 초기화 ─────────────────────────────────────────────────────── */
@@ -1048,9 +1452,9 @@ int main(int argc, char *argv[])
     g_font = font_face_load(font_path, font_size, 96);
     if (!g_font) { fprintf(stderr, "Failed to load font: %s\n", font_path); return 1; }
 
-    glyph_atlas_t *atlas  = glyph_atlas_create(1024, 1024);
-    g_renderer = gl_renderer_create(g_win_w, g_win_h, g_font, atlas);
-    if (!atlas || !g_renderer) { fprintf(stderr, "Renderer init failed\n"); return 1; }
+    g_atlas    = glyph_atlas_create(1024, 1024);
+    g_renderer = gl_renderer_create(g_win_w, g_win_h, g_font, g_atlas);
+    if (!g_atlas || !g_renderer) { fprintf(stderr, "Renderer init failed\n"); return 1; }
 
     /* 테마 배경색 + 투명도를 렌더러에 적용 */
     {
@@ -1067,6 +1471,7 @@ int main(int argc, char *argv[])
     /* ── IPC connect ─────────────────────────────────────────────────────── */
     g_client = ipc_client_create(on_pty_output, NULL);
     ipc_client_set_pane_exited_cb(g_client, on_pane_exited, NULL);
+    ipc_client_set_pane_split_cb(g_client, on_pane_split, NULL);
 
     int connect_ok;
     if (remote_target) {
@@ -1129,7 +1534,9 @@ int main(int argc, char *argv[])
 
                 if (total_panes == 0) {
                     g_active_pane = pid;
-                    g_layout = layout_create_leaf(pid, 0, 0, g_win_w, g_win_h);
+                    int lx, ly, lw, lh;
+                    compute_layout_rect(&lx, &ly, &lw, &lh);
+                    g_layout = layout_create_leaf(pid, lx, ly, lw, lh);
                 } else if (g_layout) {
                     layout_node_t *cur = layout_find_pane(g_layout, g_active_pane);
                     if (cur) {
@@ -1144,7 +1551,9 @@ int main(int argc, char *argv[])
         }
 
         if (g_layout) {
-            layout_resize_root(g_layout, 0, 0, g_win_w, g_win_h);
+            int lx, ly, lw, lh;
+            compute_layout_rect(&lx, &ly, &lw, &lh);
+            layout_resize_root(g_layout, lx, ly, lw, lh);
             resize_ctx_t rctx = { g_client, g_session_id, g_window_id, fw, fh };
             layout_each_leaf(g_layout, resize_leaf_cb, &rctx);
         }
@@ -1176,55 +1585,8 @@ int main(int argc, char *argv[])
         }
 
         fprintf(stderr, "[termemu] attaching to session_id=%u...\n", target_sid);
-        ipc_attach_pane_info_t panes[64];
-        int pane_count = 0;
-        if (ipc_client_session_attach(g_client, target_sid,
-                                       panes, 64, &pane_count) != 0) {
-            fprintf(stderr, "Failed to attach to session (daemon may need restart: pkill termemu-daemon)\n");
-            return 1;
-        }
-
-        g_session_id = target_sid;
-        if (pane_count > 0)
-            g_window_id = panes[0].window_id;
-
-        /* pane_slot 생성 + 레이아웃 (첫 pane은 루트, 나머지는 수평 분할) */
-        for (int i = 0; i < pane_count; i++) {
-            pane_slot_t *ps = pane_slot_alloc(panes[i].pane_id,
-                                               panes[i].cols, panes[i].rows);
-            if (ps) {
-                screen_apply_theme(&ps->screen, g_theme);
-                screen_set_clipboard_cb(&ps->screen, on_clipboard_set, NULL);
-            }
-
-            if (i == 0) {
-                g_active_pane = panes[i].pane_id;
-                g_layout = layout_create_leaf(panes[i].pane_id,
-                                               0, 0, g_win_w, g_win_h);
-            } else if (g_layout) {
-                layout_node_t *cur = layout_find_pane(g_layout, g_active_pane);
-                if (cur) {
-                    layout_split(cur, LAYOUT_SPLIT_H, 0.5f, panes[i].pane_id);
-                    layout_node_t *r = cur;
-                    while (r->parent) r = r->parent;
-                    g_layout = r;
-                }
-            }
-        }
-
-        /* SIGWINCH 트릭: attach 후 resize를 보내 원격 앱이 화면을 다시 그리게 함 */
-        if (g_layout) {
-            layout_resize_root(g_layout, 0, 0, g_win_w, g_win_h);
-            resize_ctx_t rctx = { g_client, g_session_id, g_window_id, fw, fh };
-            layout_each_leaf(g_layout, resize_leaf_cb, &rctx);
-        }
-
-        /* PTY 히스토리 replay 요청 (pane_slot 생성 완료 후이므로 안전) */
-        for (int i = 0; i < pane_count; i++)
-            ipc_client_pane_replay(g_client, panes[i].pane_id);
-
-        fprintf(stderr, "[termemu] attached to session '%s' (%d panes)\n",
-                attach_name, pane_count);
+        session_attach_setup(target_sid, cols, rows, fw, fh);
+        fprintf(stderr, "[termemu] attached to session '%s'\n", attach_name);
     } else {
         /* 세션 목록 조회 + 선택 다이얼로그 항상 표시 (원격도 동일) */
         ipc_client_session_list(g_client, g_picker_sessions, 64, &g_picker_count);
@@ -1436,14 +1798,15 @@ int main(int argc, char *argv[])
     for (int i = 0; i < MAX_PANES; i++)
         if (g_panes[i].used) screen_destroy(&g_panes[i].screen);
 
-    ipc_client_session_destroy(g_client, g_session_id);
+    /* 세션은 데몬에서 수명 관리 (모든 클라이언트 detach 후 5분 idle → 자동 destroy).
+     * 여기서 명시적으로 destroy 하지 않는다 — 재접속 가능하도록 유지. */
     ipc_client_disconnect(g_client);
     ipc_client_destroy(g_client);
 
     if (fs_watcher) fs_watch_destroy(fs_watcher);
     nk_impl_shutdown();
     gl_renderer_destroy(g_renderer);
-    glyph_atlas_destroy(atlas);
+    glyph_atlas_destroy(g_atlas);
     font_face_destroy(g_font);
     layout_destroy(g_layout);
 

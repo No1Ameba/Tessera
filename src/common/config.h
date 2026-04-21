@@ -58,6 +58,12 @@ typedef struct {
     char scroll_up[64];         /* 기본: Shift+Prior */
     char scroll_down[64];       /* 기본: Shift+Next  */
     char preferences[64];       /* 기본: Ctrl+comma  */
+    char copy[64];              /* 기본: Ctrl+Shift+c (Ctrl+Insert 도 상시 지원) */
+    char paste[64];             /* 기본: Ctrl+Shift+v (Shift+Insert 도 상시 지원) */
+    char resize_left[64];       /* 기본: Alt+Shift+h */
+    char resize_right[64];      /* 기본: Alt+Shift+l */
+    char resize_up[64];         /* 기본: Alt+Shift+k */
+    char resize_down[64];       /* 기본: Alt+Shift+j */
 } keybindings_t;
 
 /* ─── 설정 ──────────────────────────────────────────────────────────────── */
