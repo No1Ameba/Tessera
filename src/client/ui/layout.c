@@ -155,3 +155,70 @@ void layout_each_leaf(layout_node_t *root,
     layout_each_leaf(root->children[0], cb, user);
     layout_each_leaf(root->children[1], cb, user);
 }
+
+/* ── Serialization ───────────────────────────────────────────────────────── */
+
+static int ser_rec(const layout_node_t *n, uint8_t *buf, size_t cap, size_t *off)
+{
+    if (!n) return -1;
+    if (n->type == LAYOUT_LEAF) {
+        if (*off + 1 + 4 > cap) return -1;
+        buf[(*off)++] = 0;
+        memcpy(buf + *off, &n->pane_id, 4); *off += 4;
+        return 0;
+    }
+    if (*off + 1 + 4 > cap) return -1;
+    buf[(*off)++] = (n->type == LAYOUT_SPLIT_H) ? 1 : 2;
+    float r = n->split_ratio;
+    memcpy(buf + *off, &r, 4); *off += 4;
+    if (ser_rec(n->children[0], buf, cap, off) < 0) return -1;
+    if (ser_rec(n->children[1], buf, cap, off) < 0) return -1;
+    return 0;
+}
+
+int layout_serialize(const layout_node_t *root, uint8_t *buf, size_t buf_size)
+{
+    if (!root || !buf) return -1;
+    size_t off = 0;
+    if (ser_rec(root, buf, buf_size, &off) < 0) return -1;
+    return (int)off;
+}
+
+static layout_node_t *deser_rec(const uint8_t *buf, size_t cap, size_t *off,
+                                 layout_node_t *parent)
+{
+    if (*off + 1 > cap) return NULL;
+    uint8_t type = buf[(*off)++];
+    if (type == 0) {
+        if (*off + 4 > cap) return NULL;
+        uint32_t pid;
+        memcpy(&pid, buf + *off, 4); *off += 4;
+        layout_node_t *n = calloc(1, sizeof *n);
+        if (!n) return NULL;
+        n->type = LAYOUT_LEAF; n->pane_id = pid; n->parent = parent;
+        return n;
+    }
+    if (type != 1 && type != 2) return NULL;
+    if (*off + 4 > cap) return NULL;
+    float ratio;
+    memcpy(&ratio, buf + *off, 4); *off += 4;
+    layout_node_t *n = calloc(1, sizeof *n);
+    if (!n) return NULL;
+    n->type = (type == 1) ? LAYOUT_SPLIT_H : LAYOUT_SPLIT_V;
+    n->split_ratio = ratio;
+    n->parent = parent;
+    n->children[0] = deser_rec(buf, cap, off, n);
+    n->children[1] = deser_rec(buf, cap, off, n);
+    if (!n->children[0] || !n->children[1]) {
+        layout_destroy(n);
+        return NULL;
+    }
+    return n;
+}
+
+layout_node_t *layout_deserialize(const uint8_t *buf, size_t buf_size)
+{
+    if (!buf || buf_size == 0) return NULL;
+    size_t off = 0;
+    return deser_rec(buf, buf_size, &off, NULL);
+}

@@ -29,6 +29,8 @@ struct ipc_client {
     void            *cb_user;
     pane_exited_cb_t exit_cb;
     void            *exit_cb_user;
+    pane_split_cb_t  split_cb;
+    void            *split_cb_user;
     uint8_t          rbuf[RECV_BUF_SIZE];
     size_t           rbuf_len;
 };
@@ -112,6 +114,14 @@ static int dispatch_one(ipc_client_t *c,
         ipc_payload_pane_ref_t ref;
         memcpy(&ref, payload, sizeof ref);
         c->exit_cb(ref.pane_id, c->exit_cb_user);
+    } else if (type == IPC_MSG_PANE_SPLIT_NOTIFY && c->split_cb &&
+               hdr.payload_len >= sizeof(ipc_payload_pane_split_notify_t)) {
+        ipc_payload_pane_split_notify_t n;
+        memcpy(&n, payload, sizeof n);
+        c->split_cb(n.session_id, n.window_id,
+                    n.parent_pane_id, n.new_pane_id,
+                    n.cols, n.rows, n.direction, n.ratio,
+                    c->split_cb_user);
     } else if (want && type == (int)want && out_payload && out_size) {
         size_t copy = hdr.payload_len < out_size ? hdr.payload_len : out_size;
         memcpy(out_payload, payload, copy);
@@ -244,6 +254,14 @@ void ipc_client_set_pane_exited_cb(ipc_client_t *c,
     c->exit_cb_user = user;
 }
 
+void ipc_client_set_pane_split_cb(ipc_client_t *c,
+                                   pane_split_cb_t cb, void *user)
+{
+    if (!c) return;
+    c->split_cb      = cb;
+    c->split_cb_user = user;
+}
+
 int ipc_client_connect(ipc_client_t *c)
 {
     char path[IPC_SOCKET_PATH_MAX];
@@ -371,16 +389,50 @@ int ipc_client_window_focus(ipc_client_t *c, uint32_t session_id,
     return recv_until(c, IPC_MSG_OK, NULL, 0, CMD_TIMEOUT_MS) < 0 ? -1 : 0;
 }
 
+int ipc_client_window_layout(ipc_client_t *c, uint32_t session_id,
+                              uint32_t window_id,
+                              const uint8_t *blob, uint16_t blob_len)
+{
+    if (!c) return -1;
+    size_t total = sizeof(ipc_payload_window_layout_t) + blob_len;
+    uint8_t buf[sizeof(ipc_payload_window_layout_t) + 4096];
+    if (total > sizeof(buf)) return -1;
+    ipc_payload_window_layout_t *h = (ipc_payload_window_layout_t *)buf;
+    memset(h, 0, sizeof(*h));
+    h->session_id = session_id;
+    h->window_id  = window_id;
+    h->blob_len   = blob_len;
+    if (blob && blob_len) memcpy(buf + sizeof(*h), blob, blob_len);
+    if (send_msg(write_fd(c), IPC_MSG_WINDOW_LAYOUT, buf, total) != 0) return -1;
+    return recv_until(c, IPC_MSG_OK, NULL, 0, CMD_TIMEOUT_MS) < 0 ? -1 : 0;
+}
+
 /* ── Pane operations ─────────────────────────────────────────────────────── */
 
 int ipc_client_pane_create(ipc_client_t *c, uint32_t session_id,
                             uint32_t window_id, uint16_t cols, uint16_t rows,
                             uint32_t *out_id)
 {
-    ipc_payload_pane_create_t req = {
-        .session_id = session_id, .window_id = window_id,
-        .cols = cols, .rows = rows,
-    };
+    return ipc_client_pane_create_split(c, session_id, window_id, cols, rows,
+                                         0, 0, 0.0f, out_id);
+}
+
+int ipc_client_pane_create_split(ipc_client_t *c, uint32_t session_id,
+                                  uint32_t window_id,
+                                  uint16_t cols, uint16_t rows,
+                                  uint32_t parent_pane_id,
+                                  uint8_t direction, float ratio,
+                                  uint32_t *out_id)
+{
+    ipc_payload_pane_create_t req;
+    memset(&req, 0, sizeof req);
+    req.session_id     = session_id;
+    req.window_id      = window_id;
+    req.cols           = cols;
+    req.rows           = rows;
+    req.parent_pane_id = parent_pane_id;
+    req.direction      = direction;
+    req.ratio          = ratio;
     if (send_msg(write_fd(c), IPC_MSG_PANE_CREATE, &req, sizeof req) != 0) return -1;
 
     ipc_payload_pane_created_t resp = {0};
@@ -457,7 +509,7 @@ int ipc_client_pty_input(ipc_client_t *c, uint32_t pane_id,
 
 int ipc_client_poll(ipc_client_t *c, int timeout_ms)
 {
-    if (!c || c->fd < 0) return -1;
+    if (!c || read_fd(c) < 0) return -1;
 
     struct pollfd pfd = { .fd = read_fd(c), .events = POLLIN };
     int ret = poll(&pfd, 1, timeout_ms);
@@ -557,22 +609,26 @@ int ipc_client_session_attach(ipc_client_t *c, uint32_t session_id,
                                ipc_attach_pane_info_t *panes_out, int max_panes,
                                int *out_count)
 {
+    return ipc_client_session_attach_ex(c, session_id, panes_out, max_panes,
+                                         out_count, NULL, 0, NULL);
+}
+
+int ipc_client_session_attach_ex(ipc_client_t *c, uint32_t session_id,
+                                  ipc_attach_pane_info_t *panes_out, int max_panes,
+                                  int *out_count,
+                                  uint8_t *blob_buf, size_t blob_buf_size,
+                                  uint16_t *out_blob_len)
+{
     if (!c || !panes_out || !out_count) return -1;
 
-    fprintf(stderr, "[attach] sending SESSION_ATTACH session_id=%u\n", session_id);
     ipc_payload_session_attach_t req = { .session_id = session_id };
-    if (send_msg(write_fd(c), IPC_MSG_SESSION_ATTACH, &req, sizeof req) != 0) {
-        fprintf(stderr, "[attach] send_msg failed\n");
+    if (send_msg(write_fd(c), IPC_MSG_SESSION_ATTACH, &req, sizeof req) != 0)
         return -1;
-    }
 
-    fprintf(stderr, "[attach] waiting for SESSION_ATTACH_R (timeout=%dms)...\n", CMD_TIMEOUT_MS);
     uint8_t buf[IPC_MAX_PAYLOAD_LEN];
     if (recv_until(c, IPC_MSG_SESSION_ATTACH_R, buf, sizeof buf,
-                    CMD_TIMEOUT_MS) < 0) {
-        fprintf(stderr, "[attach] recv_until failed (timeout or error)\n");
+                    CMD_TIMEOUT_MS) < 0)
         return -1;
-    }
 
     const ipc_payload_session_attach_r_t *resp =
         (const ipc_payload_session_attach_r_t *)buf;
@@ -583,8 +639,16 @@ int ipc_client_session_attach(ipc_client_t *c, uint32_t session_id,
         (const ipc_attach_pane_info_t *)(buf + sizeof(*resp));
     for (int i = 0; i < cnt; i++)
         panes_out[i] = arr[i];
-
     *out_count = cnt;
+
+    uint16_t bl = resp->layout_blob_len;
+    if (out_blob_len) *out_blob_len = bl;
+    if (blob_buf && bl > 0) {
+        size_t copy = bl < blob_buf_size ? bl : blob_buf_size;
+        const uint8_t *blob_src =
+            buf + sizeof(*resp) + (size_t)resp->pane_count * sizeof(ipc_attach_pane_info_t);
+        memcpy(blob_buf, blob_src, copy);
+    }
     return 0;
 }
 

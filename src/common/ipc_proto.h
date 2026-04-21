@@ -50,6 +50,7 @@ typedef enum {
     IPC_MSG_WINDOW_CREATED  = 0x21,  /* D→C  윈도우 생성 완료 */
     IPC_MSG_WINDOW_DESTROY  = 0x22,  /* C→D  윈도우 삭제 요청 */
     IPC_MSG_WINDOW_FOCUS    = 0x23,  /* C→D  active window 변경 */
+    IPC_MSG_WINDOW_LAYOUT   = 0x24,  /* C→D  레이아웃 트리 blob 업데이트 (재접속 복원용) */
 
     /* ── 페인 ───────────────────────────── */
     IPC_MSG_PANE_CREATE     = 0x30,  /* C→D  페인 생성 + PTY 스폰 요청 */
@@ -58,6 +59,7 @@ typedef enum {
     IPC_MSG_PANE_RESIZE     = 0x33,  /* C→D  터미널 크기 변경 */
     IPC_MSG_PANE_FOCUS      = 0x34,  /* C→D  active pane 변경 */
     IPC_MSG_PANE_EXITED     = 0x35,  /* D→C  PTY 종료 (셸 exit) 통보 */
+    IPC_MSG_PANE_SPLIT_NOTIFY = 0x36, /* D→C  다른 클라이언트의 split 통지 (브로드캐스트) */
 
     /* ── 데이터 ─────────────────────────── */
     IPC_MSG_PTY_INPUT       = 0x40,  /* C→D  키보드/마우스 → PTY stdin */
@@ -144,13 +146,43 @@ typedef struct {
     uint32_t window_id;
 } ipc_payload_window_ref_t;
 
-/* IPC_MSG_PANE_CREATE  C→D */
+/* IPC_MSG_WINDOW_LAYOUT  C→D
+ * 페이로드: 이 헤더 + blob[blob_len]. daemon 은 layout 포맷을 해석하지 않고
+ * 원본을 저장했다가 SESSION_ATTACH_R 응답에 동봉한다. */
+typedef struct {
+    uint32_t session_id;
+    uint32_t window_id;
+    uint16_t blob_len;
+    uint8_t  reserved[2];
+    /* uint8_t blob[blob_len] — 뒤에 인라인 */
+} ipc_payload_window_layout_t;
+
+/* IPC_MSG_PANE_CREATE  C→D
+ * parent_pane_id != 0 이면 split 컨텍스트 — 데몬은 PANE_SPLIT_NOTIFY 를
+ * 다른 클라이언트들에 브로드캐스트한다. parent_pane_id == 0 은 첫 pane 생성. */
 typedef struct {
     uint32_t session_id;
     uint32_t window_id;
     uint16_t cols;
     uint16_t rows;
+    uint32_t parent_pane_id;
+    uint8_t  direction;     /* 0 = LAYOUT_SPLIT_H, 1 = LAYOUT_SPLIT_V */
+    uint8_t  reserved[3];
+    float    ratio;
 } ipc_payload_pane_create_t;
+
+/* IPC_MSG_PANE_SPLIT_NOTIFY  D→C */
+typedef struct {
+    uint32_t session_id;
+    uint32_t window_id;
+    uint32_t parent_pane_id;
+    uint32_t new_pane_id;
+    uint16_t cols;
+    uint16_t rows;
+    uint8_t  direction;
+    uint8_t  reserved[3];
+    float    ratio;
+} ipc_payload_pane_split_notify_t;
 
 /* IPC_MSG_PANE_CREATED  D→C */
 typedef struct {
@@ -192,11 +224,14 @@ typedef struct {
 } ipc_payload_session_attach_t;
 
 /* IPC_MSG_SESSION_ATTACH_R  D→C
- * 페이로드: 이 헤더 + ipc_attach_pane_info_t[pane_count] 배열 */
+ * 페이로드: 이 헤더 + ipc_attach_pane_info_t[pane_count] + layout_blob[layout_blob_len].
+ * layout_blob 은 window_id=first_window 의 직렬화된 layout tree. */
 typedef struct {
     uint32_t session_id;
     uint32_t pane_count;
     char     session_name[64];
+    uint16_t layout_blob_len;  /* 0 = layout 정보 없음 (이전 버전 호환 시 flat split 사용) */
+    uint8_t  reserved[2];
 } ipc_payload_session_attach_r_t;
 
 typedef struct {

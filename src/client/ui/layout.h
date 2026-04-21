@@ -13,6 +13,7 @@
  */
 
 #include <stdint.h>
+#include <stddef.h>
 
 typedef enum {
     LAYOUT_LEAF,     /* leaf node: contains a PTY pane */
@@ -82,5 +83,23 @@ layout_node_t *layout_find_pane(layout_node_t *root, uint32_t pane_id);
 void layout_each_leaf(layout_node_t *root,
                        void (*cb)(layout_node_t *leaf, void *user),
                        void *user);
+
+/* ── 직렬화 ──────────────────────────────────────────────────────────────── */
+
+/*
+ * 트리를 preorder 로 직렬화한다.
+ * 포맷 (little-endian):
+ *   LEAF : u8(0) u32(pane_id)
+ *   SPLIT: u8(1=H, 2=V) f32(ratio) <left> <right>
+ * @return 작성한 바이트 수. buf_size 부족 시 -1.
+ */
+int layout_serialize(const layout_node_t *root, uint8_t *buf, size_t buf_size);
+
+/*
+ * 위 포맷으로 직렬화된 바이트에서 트리를 복원한다.
+ * rect 는 (0,0,0,0) 으로 초기화되며 이후 layout_resize_root 로 채워야 한다.
+ * @return 루트 노드 또는 NULL (포맷 오류/메모리 부족).
+ */
+layout_node_t *layout_deserialize(const uint8_t *buf, size_t buf_size);
 
 #endif /* TERMEMU_LAYOUT_H */
