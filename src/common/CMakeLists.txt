@@ -1,6 +1,7 @@
 add_library(termemu_common STATIC
     vt_parser.c
     config.c
+    theme_presets.c
     utf8.c
     session_file.c
 )

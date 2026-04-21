@@ -97,6 +97,17 @@ bool theme_load_string(const char *json, termemu_theme_t *t);
 bool theme_load_file(const char *path, termemu_theme_t *t);
 bool theme_save_file(const char *path, const termemu_theme_t *t);
 
+/* ─── 샘플 테마 프리셋 ───────────────────────────────────────────────────── */
+
+/* 내장 테마 개수. idx 는 0..count-1. */
+int  theme_preset_count(void);
+/* 프리셋 이름 (UI 표시용). NULL 이 아님이 보장됨. */
+const char *theme_preset_name(int idx);
+/* 프리셋 내용을 out 에 기록. 잘못된 idx 면 false. */
+bool theme_preset_get(int idx, termemu_theme_t *out);
+/* 주어진 테마가 어떤 프리셋과 정확히 일치하면 그 idx, 아니면 -1 (Custom). */
+int  theme_preset_match(const termemu_theme_t *t);
+
 /* ─── 설정 API ──────────────────────────────────────────────────────────── */
 
 void config_defaults(termemu_config_t *cfg);
