@@ -97,6 +97,17 @@ static int dispatch_one(ipc_client_t *c,
 
     ipc_msg_header_t hdr;
     memcpy(&hdr, c->rbuf, sizeof hdr);
+
+    /* 프로토콜 desync 감지 — 매직이 맞지 않으면 스트림이 어긋난 것이므로
+     * 버퍼를 초기화해 연결을 끊는다. 이후 처리는 호출자가 read=0/-1 로 인식. */
+    uint32_t expected = ((uint32_t)IPC_VERSION << 24) | IPC_MAGIC;
+    if (hdr.magic_ver != expected) {
+        fprintf(stderr, "[ipc] protocol desync: magic=0x%08x expected=0x%08x\n",
+                hdr.magic_ver, expected);
+        c->rbuf_len = 0;
+        return -1;
+    }
+
     size_t total = sizeof hdr + hdr.payload_len;
     if (c->rbuf_len < total) return -1;
 
@@ -403,8 +414,10 @@ int ipc_client_window_layout(ipc_client_t *c, uint32_t session_id,
     h->window_id  = window_id;
     h->blob_len   = blob_len;
     if (blob && blob_len) memcpy(buf + sizeof(*h), blob, blob_len);
-    if (send_msg(write_fd(c), IPC_MSG_WINDOW_LAYOUT, buf, total) != 0) return -1;
-    return recv_until(c, IPC_MSG_OK, NULL, 0, CMD_TIMEOUT_MS) < 0 ? -1 : 0;
+    /* 비동기 — OK 응답 대기 안 함. on_pane_exited 등 콜백에서도 호출되므로
+     * recv_until 로 인한 재귀 dispatch 를 피해야 한다. 응답은 이후
+     * ipc_client_poll 에서 자연스럽게 소비된다. */
+    return send_msg(write_fd(c), IPC_MSG_WINDOW_LAYOUT, buf, total);
 }
 
 /* ── Pane operations ─────────────────────────────────────────────────────── */
@@ -460,8 +473,9 @@ int ipc_client_pane_resize(ipc_client_t *c, uint32_t session_id,
         .session_id = session_id, .window_id = window_id, .pane_id = pane_id,
         .cols = cols, .rows = rows,
     };
-    if (send_msg(write_fd(c), IPC_MSG_PANE_RESIZE, &req, sizeof req) != 0) return -1;
-    return recv_until(c, IPC_MSG_OK, NULL, 0, CMD_TIMEOUT_MS) < 0 ? -1 : 0;
+    /* 비동기 — on_pane_exited / framebuffer resize 등 빈번한 호출 경로에서
+     * 재진입 dispatch 를 피한다. 실패해도 다음 resize 에서 복구됨. */
+    return send_msg(write_fd(c), IPC_MSG_PANE_RESIZE, &req, sizeof req);
 }
 
 int ipc_client_pane_focus(ipc_client_t *c, uint32_t session_id,
