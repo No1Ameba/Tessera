@@ -288,6 +288,45 @@ static void tab_keybindings(struct nk_context *ctx, termemu_config_t *cfg)
 
 static void tab_colors(struct nk_context *ctx, termemu_theme_t *theme)
 {
+    /* ── 프리셋 드롭다운 (최상단) ─────────────────────────────────────── */
+    int preset_count = theme_preset_count();
+    /* 표시 리스트: 프리셋 0..N-1, 마지막에 "Custom" */
+    static const char *menu[16];
+    int menu_n = 0;
+    for (int i = 0; i < preset_count && menu_n < 15; i++)
+        menu[menu_n++] = theme_preset_name(i);
+    menu[menu_n++] = "Custom";
+
+    int matched = theme_preset_match(theme);
+    int current = (matched >= 0) ? matched : (menu_n - 1);  /* Custom 행 */
+
+    nk_layout_row_begin(ctx, NK_DYNAMIC, 30, 2);
+    nk_layout_row_push(ctx, 0.3f);
+    nk_label(ctx, "Theme:", NK_TEXT_LEFT);
+    nk_layout_row_push(ctx, 0.7f);
+    int new_sel = nk_combo(ctx, menu, menu_n, current, 25, nk_vec2(260, 300));
+    nk_layout_row_end(ctx);
+
+    if (new_sel != current && new_sel >= 0 && new_sel < preset_count) {
+        /* 프리셋 선택 — name 은 유지, 색상만 교체 */
+        termemu_theme_t preset;
+        if (theme_preset_get(new_sel, &preset)) {
+            theme->background            = preset.background;
+            theme->foreground            = preset.foreground;
+            theme->cursor_color          = preset.cursor_color;
+            theme->selection_background  = preset.selection_background;
+            for (int i = 0; i < 16; i++) theme->ansi[i] = preset.ansi[i];
+            strncpy(theme->name, preset.name, sizeof(theme->name) - 1);
+            theme->name[sizeof(theme->name) - 1] = '\0';
+        }
+    }
+
+    nk_layout_row_dynamic(ctx, 8, 1);
+    nk_spacing(ctx, 1);
+
+    /* 색상 수정 시 UI 드롭다운은 다음 프레임에 자동으로 "Custom" 전환됨
+     * (theme_preset_match 재계산). 수동 표시 없이도 동작. */
+
     color_row(ctx, "Foreground:", &theme->foreground);
     color_row(ctx, "Background:", &theme->background);
 
