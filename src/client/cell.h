@@ -25,6 +25,7 @@ typedef struct {
     uint8_t  fg_r, fg_g, fg_b;
     uint8_t  bg_r, bg_g, bg_b;
     uint8_t  attrs;           /* CELL_ATTR_* bitmask */
+    uint16_t link_id;         /* OSC 8 하이퍼링크 id (0 = 링크 없음) */
 } term_cell_t;
 
 /* Pixel rectangle used by both layout and renderer. */

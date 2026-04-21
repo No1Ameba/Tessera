@@ -29,6 +29,11 @@ gl_renderer_t *gl_renderer_create(int viewport_w, int viewport_h,
 void           gl_renderer_destroy(gl_renderer_t *r);
 void           gl_renderer_resize(gl_renderer_t *r, int w, int h);
 
+/* 폰트/아틀라스 교체 (hot reload). cell 메트릭 재계산. 이전 font/atlas 는
+ * 호출자가 destroy 해야 한다. 렌더러는 포인터만 바꾼다. */
+void           gl_renderer_set_font(gl_renderer_t *r,
+                                     font_face_t *font, glyph_atlas_t *atlas);
+
 /* Clear the screen.  Call once at the start of each frame. */
 void gl_renderer_begin_frame(gl_renderer_t *r);
 
@@ -57,8 +62,11 @@ void gl_renderer_draw_cells(gl_renderer_t *r,
  * 커서를 렌더링한다. draw_cells() 이후에 호출.
  * cursor_style: CURSOR_STYLE_* (0=default/block, 1=block_blink, 2=block, ...)
  * visible: 블링크 토글 상태 (1=보임, 0=숨김)
+ * cells: reverse-video 글리프 재그리기를 위해 현재 셀 버퍼 전달.
+ * cols: cells 그리드의 한 행 폭.
  */
 void gl_renderer_draw_cursor(gl_renderer_t *r,
+                              const term_cell_t *cells, int cols,
                               int col, int row, int cursor_style, int visible,
                               float fg_r, float fg_g, float fg_b,
                               pane_rect_t pane);

@@ -188,10 +188,11 @@ void config_defaults(termemu_config_t *cfg) {
 /* ─── 설정 파싱 ─────────────────────────────────────────────────────────── */
 
 static cursor_style_t parse_cursor_style(const char *s) {
-    if (!s)                        return CURSOR_BLOCK;
-    if (strcmp(s, "block")     == 0) return CURSOR_BLOCK;
-    if (strcmp(s, "underline") == 0) return CURSOR_UNDERLINE;
-    if (strcmp(s, "bar")       == 0) return CURSOR_BAR;
+    if (!s)                             return CURSOR_BLOCK;
+    if (strcmp(s, "block")        == 0) return CURSOR_BLOCK;
+    if (strcmp(s, "underline")    == 0) return CURSOR_UNDERLINE;
+    if (strcmp(s, "bar")          == 0) return CURSOR_BAR;
+    if (strcmp(s, "block_hollow") == 0) return CURSOR_BLOCK_HOLLOW;
     return CURSOR_BLOCK;
 }
 
@@ -344,8 +345,9 @@ bool config_save_file(const char *path, const termemu_config_t *cfg) {
     /* cursor */
     cJSON *cursor = cJSON_CreateObject();
     const char *style_str = "block";
-    if (cfg->cursor_style == CURSOR_UNDERLINE) style_str = "underline";
-    else if (cfg->cursor_style == CURSOR_BAR)  style_str = "bar";
+    if      (cfg->cursor_style == CURSOR_UNDERLINE)    style_str = "underline";
+    else if (cfg->cursor_style == CURSOR_BAR)          style_str = "bar";
+    else if (cfg->cursor_style == CURSOR_BLOCK_HOLLOW) style_str = "block_hollow";
     cJSON_AddStringToObject(cursor, "style", style_str);
     cJSON_AddBoolToObject(cursor, "blink", cfg->cursor_blink);
     cJSON_AddItemToObject(root, "cursor", cursor);

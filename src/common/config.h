@@ -19,9 +19,10 @@
 /* ─── 커서 스타일 ───────────────────────────────────────────────────────── */
 
 typedef enum {
-    CURSOR_BLOCK     = 1,
-    CURSOR_UNDERLINE = 2,
-    CURSOR_BAR       = 3,
+    CURSOR_BLOCK        = 1,
+    CURSOR_UNDERLINE    = 2,
+    CURSOR_BAR          = 3,
+    CURSOR_BLOCK_HOLLOW = 4,
 } cursor_style_t;
 
 /* ─── 테마 ──────────────────────────────────────────────────────────────── */

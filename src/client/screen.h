@@ -79,6 +79,15 @@ typedef struct {
     void (*clipboard_cb)(const char *text, void *user);
     void  *clipboard_user;
 
+    /* OSC 8 하이퍼링크 테이블 */
+    struct {
+        uint16_t id;
+        char     url[512];
+    }        links[64];
+    int      link_count;
+    uint16_t active_link_id;  /* 현재 OSC 8 로 활성화된 링크 id (0 = 없음) */
+    uint16_t next_link_id;    /* 단조 증가 카운터 */
+
     /* VT 파서 (임베디드) */
     vt_parser_t parser;
 } screen_t;
@@ -177,5 +186,8 @@ void screen_update_palette(screen_t *s, const termemu_theme_t *t);
 void screen_set_clipboard_cb(screen_t *s,
                               void (*cb)(const char *text, void *user),
                               void *user);
+
+/* link_id 로 저장된 URL 을 조회한다. 없으면 NULL. */
+const char *screen_link_url(const screen_t *s, uint16_t link_id);
 
 #endif /* TERMEMU_SCREEN_H */

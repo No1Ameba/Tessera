@@ -157,10 +157,12 @@ static void print_char(screen_t *s, uint32_t cp)
 
     /* 선두 셀 기록 */
     term_cell_t *cell = &s->cells[s->cy * s->cols + s->cx];
+    uint8_t link_attr = s->active_link_id ? CELL_ATTR_UNDERLINE : 0;
     cell->codepoint = cp;
     cell->fg_r = s->fg_r; cell->fg_g = s->fg_g; cell->fg_b = s->fg_b;
     cell->bg_r = s->bg_r; cell->bg_g = s->bg_g; cell->bg_b = s->bg_b;
-    cell->attrs = s->attrs | (w == 2 ? CELL_ATTR_WIDE : 0);
+    cell->attrs = s->attrs | (w == 2 ? CELL_ATTR_WIDE : 0) | link_attr;
+    cell->link_id = s->active_link_id;
 
     /* wide char: 다음 칸을 continuation 셀로 표시 */
     if (w == 2 && s->cx + 1 < s->cols) {
@@ -169,6 +171,7 @@ static void print_char(screen_t *s, uint32_t cp)
         cont->fg_r = s->fg_r; cont->fg_g = s->fg_g; cont->fg_b = s->fg_b;
         cont->bg_r = s->bg_r; cont->bg_g = s->bg_g; cont->bg_b = s->bg_b;
         cont->attrs = CELL_ATTR_WIDE_CONT;
+        cont->link_id = s->active_link_id;
     }
 
     int next = s->cx + w;
@@ -618,6 +621,43 @@ static void cb_osc(void *ctx, const char *payload, size_t len)
         if (tlen >= sizeof s->title) tlen = sizeof s->title - 1;
         memcpy(s->title, payload + i, tlen);
         s->title[tlen] = '\0';
+    } else if (code == 8) {
+        /* OSC 8: 하이퍼링크 — "8;params;URI".
+         * URI 가 비어있으면 활성 링크 해제, 아니면 테이블에 저장 후 활성화. */
+        const char *rest = payload + i;
+        size_t rlen = len - i;
+        const char *semi = memchr(rest, ';', rlen);
+        if (!semi) return;
+        size_t skip = (size_t)(semi - rest) + 1;
+        const char *uri = rest + skip;
+        size_t uri_len = rlen - skip;
+        if (uri_len == 0) {
+            s->active_link_id = 0;
+            return;
+        }
+        /* 기존 테이블에서 같은 URL 검색 (중복 저장 방지) */
+        for (int k = 0; k < s->link_count; k++) {
+            if (strncmp(s->links[k].url, uri, uri_len) == 0 &&
+                s->links[k].url[uri_len] == '\0') {
+                s->active_link_id = s->links[k].id;
+                return;
+            }
+        }
+        /* 새 링크 등록 */
+        int slot = s->link_count;
+        if (slot >= (int)(sizeof(s->links) / sizeof(s->links[0]))) {
+            /* 오래된 엔트리를 덮어쓰기 (ring replacement) */
+            slot = s->next_link_id % (int)(sizeof(s->links) / sizeof(s->links[0]));
+        } else {
+            s->link_count++;
+        }
+        size_t cpy = uri_len;
+        if (cpy >= sizeof(s->links[0].url)) cpy = sizeof(s->links[0].url) - 1;
+        memcpy(s->links[slot].url, uri, cpy);
+        s->links[slot].url[cpy] = '\0';
+        s->links[slot].id = ++s->next_link_id;
+        if (s->next_link_id == 0) s->next_link_id = 1;  /* 0 은 "링크 없음" 예약 */
+        s->active_link_id = s->links[slot].id;
     } else if (code == 52) {
         /* OSC 52: 클립보드 — "52;c;BASE64" 또는 "52;pc;BASE64" */
         /* 'c' 또는 'pc' 등의 selection parameter 건너뛰기 */
@@ -864,6 +904,14 @@ void screen_set_clipboard_cb(screen_t *s,
     if (!s) return;
     s->clipboard_cb   = cb;
     s->clipboard_user = user;
+}
+
+const char *screen_link_url(const screen_t *s, uint16_t link_id)
+{
+    if (!s || link_id == 0) return NULL;
+    for (int k = 0; k < s->link_count; k++)
+        if (s->links[k].id == link_id) return s->links[k].url;
+    return NULL;
 }
 
 /* 팔레트 + 기본 fg/bg 갱신 공통 로직 */

@@ -31,11 +31,13 @@ static const char *BG_VERT =
     "layout(location=1) in vec2 i_cell;\n"
     "layout(location=2) in vec3 i_bg;\n"
     "uniform vec2 u_cell_size;\n"
+    "uniform vec2 u_quad_size;\n"
     "uniform vec2 u_viewport;\n"
     "uniform vec2 u_pane_offset;\n"
     "out vec3 v_color;\n"
     "void main() {\n"
-    "  vec2 pix = u_pane_offset + i_cell * u_cell_size + v_pos * u_cell_size;\n"
+    "  vec2 qs = (u_quad_size.x > 0.0) ? u_quad_size : u_cell_size;\n"
+    "  vec2 pix = u_pane_offset + i_cell * u_cell_size + v_pos * qs;\n"
     "  vec2 ndc = (pix / u_viewport) * 2.0 - 1.0;\n"
     "  ndc.y = -ndc.y;\n"
     "  gl_Position = vec4(ndc, 0.0, 1.0);\n"
@@ -273,6 +275,16 @@ gl_renderer_t *gl_renderer_create(int vw, int vh,
     return r;
 }
 
+void gl_renderer_set_font(gl_renderer_t *r, font_face_t *font, glyph_atlas_t *atlas)
+{
+    if (!r || !font || !atlas) return;
+    r->font     = font;
+    r->atlas    = atlas;
+    r->cell_w   = font_cell_width(font);
+    r->cell_h   = font_cell_height(font);
+    r->ascender = font_ascender(font);
+}
+
 void gl_renderer_destroy(gl_renderer_t *r)
 {
     if (!r) return;
@@ -433,6 +445,7 @@ void gl_renderer_draw_cells(gl_renderer_t *r,
 
         glUseProgram(r->bg_prog);
         glUniform2f(glGetUniformLocation(r->bg_prog, "u_cell_size"),   cw, ch);
+        glUniform2f(glGetUniformLocation(r->bg_prog, "u_quad_size"),   0.0f, 0.0f);
         glUniform2f(glGetUniformLocation(r->bg_prog, "u_viewport"),    vw, vh);
         glUniform2f(glGetUniformLocation(r->bg_prog, "u_pane_offset"), ox, oy);
         glUniform1f(glGetUniformLocation(r->bg_prog, "u_opacity"),     r->clear_a);
@@ -471,9 +484,49 @@ void gl_renderer_draw_cells(gl_renderer_t *r,
 
         glDisable(GL_BLEND);
     }
+
+    /* ── Underline pass (OSC 8 hyperlink 및 SGR underline) ─────────────── */
+    {
+        int ul_count = 0;
+        for (int row = 0; row < rows && ul_count < MAX_INSTANCES; row++) {
+            for (int col = 0; col < cols && ul_count < MAX_INSTANCES; col++) {
+                const term_cell_t *c = &cells[row * cols + col];
+                if (!(c->attrs & CELL_ATTR_UNDERLINE)) continue;
+                if (c->attrs & CELL_ATTR_WIDE_CONT) continue;
+                bg_instance_t *ui = &r->bg_buf[ul_count++];
+                /* cell_size=(cw,ch) 로 그리드 배치, quad_size=(cw,2)로 두께만 변경.
+                 * pane_offset 에 ch-2 를 더해 셀 하단에 배치. */
+                ui->col = (float)col;
+                ui->row = (float)row;
+                ui->r   = c->fg_r / 255.0f;
+                ui->g   = c->fg_g / 255.0f;
+                ui->b   = c->fg_b / 255.0f;
+            }
+        }
+        if (ul_count > 0) {
+            glBindBuffer(GL_ARRAY_BUFFER, r->bg_inst_vbo);
+            glBufferSubData(GL_ARRAY_BUFFER, 0,
+                            (GLsizeiptr)(ul_count * (int)sizeof(bg_instance_t)),
+                            r->bg_buf);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glUseProgram(r->bg_prog);
+            glUniform2f(glGetUniformLocation(r->bg_prog, "u_cell_size"), cw, ch);
+            glUniform2f(glGetUniformLocation(r->bg_prog, "u_quad_size"), cw, 2.0f);
+            glUniform2f(glGetUniformLocation(r->bg_prog, "u_viewport"),  vw, vh);
+            glUniform2f(glGetUniformLocation(r->bg_prog, "u_pane_offset"),
+                        ox, oy + ch - 2.0f);
+            glUniform1f(glGetUniformLocation(r->bg_prog, "u_opacity"), 1.0f);
+            glBindVertexArray(r->bg_vao);
+            glDrawArraysInstanced(GL_TRIANGLES, 0, 6, ul_count);
+            glBindVertexArray(0);
+            glDisable(GL_BLEND);
+        }
+    }
 }
 
 void gl_renderer_draw_cursor(gl_renderer_t *r,
+                              const term_cell_t *cells, int cols,
                               int col, int row, int cursor_style, int visible,
                               float fg_r, float fg_g, float fg_b,
                               pane_rect_t pane)
@@ -501,8 +554,43 @@ void gl_renderer_draw_cursor(gl_renderer_t *r,
      * cell_size=(1,1)로 놓고 col/row에 픽셀 좌표를 넣는다.
      */
 
-    float px_x = ox + (float)col * cw;
-    float px_y = oy + (float)row * ch;
+    float cell_x = ox + (float)col * cw;
+    float cell_y = oy + (float)row * ch;
+
+    /* Hollow block: 4 edge quads (top/bottom/left/right), no reverse video. */
+    if (cursor_style == 7 || cursor_style == 8) {
+        float thick = 1.5f;
+        struct { float x, y, w, h; } edges[4] = {
+            { cell_x,          cell_y,              cw,    thick },  /* top */
+            { cell_x,          cell_y + ch - thick, cw,    thick },  /* bottom */
+            { cell_x,          cell_y,              thick, ch    },  /* left */
+            { cell_x + cw - thick, cell_y,          thick, ch    },  /* right */
+        };
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glUseProgram(r->bg_prog);
+        glUniform2f(glGetUniformLocation(r->bg_prog, "u_quad_size"), 0.0f, 0.0f);
+        glUniform2f(glGetUniformLocation(r->bg_prog, "u_viewport"),  vw, vh);
+        glUniform1f(glGetUniformLocation(r->bg_prog, "u_opacity"),   1.0f);
+        for (int e = 0; e < 4; e++) {
+            bg_instance_t ei = { .col = 0.0f, .row = 0.0f,
+                                  .r = fg_r, .g = fg_g, .b = fg_b };
+            glBindBuffer(GL_ARRAY_BUFFER, r->bg_inst_vbo);
+            glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(ei), &ei);
+            glUniform2f(glGetUniformLocation(r->bg_prog, "u_cell_size"),
+                        edges[e].w, edges[e].h);
+            glUniform2f(glGetUniformLocation(r->bg_prog, "u_pane_offset"),
+                        edges[e].x, edges[e].y);
+            glBindVertexArray(r->bg_vao);
+            glDrawArraysInstanced(GL_TRIANGLES, 0, 6, 1);
+            glBindVertexArray(0);
+        }
+        glDisable(GL_BLEND);
+        return;
+    }
+
+    float px_x = cell_x;
+    float px_y = cell_y;
     float qw, qh;
 
     switch (cursor_style) {
@@ -518,9 +606,11 @@ void gl_renderer_draw_cursor(gl_renderer_t *r,
         break;
     }
 
-    float alpha = (cursor_style <= 2) ? 0.5f : 1.0f;
-
-    bg_instance_t inst = { .col = px_x, .row = px_y, .r = fg_r, .g = fg_g, .b = fg_b };
+    /* 셰이더 수식: pix = u_pane_offset + i_cell * u_cell_size + v_pos * u_cell_size
+     * 쿼드 한 개만 그리므로 i_cell=(0,0) 으로 두고 pane_offset 에 픽셀 위치를,
+     * cell_size 에 쿼드 크기를 넣는다. */
+    bg_instance_t inst = { .col = 0.0f, .row = 0.0f,
+                            .r = fg_r, .g = fg_g, .b = fg_b };
 
     glBindBuffer(GL_ARRAY_BUFFER, r->bg_inst_vbo);
     glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(inst), &inst);
@@ -529,13 +619,65 @@ void gl_renderer_draw_cursor(gl_renderer_t *r,
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     glUseProgram(r->bg_prog);
-    /* cell_size=(qw,qh), pane_offset=(0,0) — inst의 col/row가 이미 픽셀 좌표 */
     glUniform2f(glGetUniformLocation(r->bg_prog, "u_cell_size"), qw, qh);
+    glUniform2f(glGetUniformLocation(r->bg_prog, "u_quad_size"), 0.0f, 0.0f);
     glUniform2f(glGetUniformLocation(r->bg_prog, "u_viewport"),  vw, vh);
-    glUniform2f(glGetUniformLocation(r->bg_prog, "u_pane_offset"), 0.0f, 0.0f);
-    glUniform1f(glGetUniformLocation(r->bg_prog, "u_opacity"), alpha);
+    glUniform2f(glGetUniformLocation(r->bg_prog, "u_pane_offset"), px_x, px_y);
+    glUniform1f(glGetUniformLocation(r->bg_prog, "u_opacity"), 1.0f);
 
     glBindVertexArray(r->bg_vao);
+    glDrawArraysInstanced(GL_TRIANGLES, 0, 6, 1);
+    glBindVertexArray(0);
+
+    glDisable(GL_BLEND);
+
+    /* Block 스타일이면 커서 아래 글자를 배경색으로 덧그려 reverse video 구현.
+     * bar/underline 은 글자를 가리지 않으므로 스킵. */
+    int is_block = (cursor_style == 0 || cursor_style == 1 || cursor_style == 2);
+    if (!is_block || !cells) return;
+    if (cols <= 0 || col < 0 || col >= cols || row < 0) return;
+
+    const term_cell_t *c = &cells[row * cols + col];
+    if (!c->codepoint || c->codepoint == ' ') return;
+    if (c->attrs & CELL_ATTR_WIDE_CONT) return;
+
+    atlas_glyph_t ag = {0};
+    if (ensure_glyph(r, c->codepoint, &ag) != 0 || ag.px_w <= 0) return;
+
+    /* 커서 아래 원래 배경색을 글리프 색으로 사용.
+     * 이 셀이 원래 reverse 였거나 선택 영역이었다면 그 상태에서 스왑된 bg = 원래 fg. */
+    text_instance_t ti = {0};
+    ti.col       = (float)col;
+    ti.row       = (float)row;
+    ti.bearing_x = (float)ag.bearing_x;
+    ti.bearing_y = (float)ag.bearing_y;
+    ti.atlas_x   = ag.u;
+    ti.atlas_y   = ag.v;
+    ti.atlas_w   = ag.uw;
+    ti.atlas_h   = ag.vh;
+    ti.glyph_w   = (float)ag.px_w;
+    ti.glyph_h   = (float)ag.px_h;
+    ti.r         = c->bg_r / 255.0f;
+    ti.g         = c->bg_g / 255.0f;
+    ti.b         = c->bg_b / 255.0f;
+
+    glBindBuffer(GL_ARRAY_BUFFER, r->text_inst_vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(ti), &ti);
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    glUseProgram(r->text_prog);
+    glUniform2f(glGetUniformLocation(r->text_prog, "u_cell_size"),   cw, ch);
+    glUniform2f(glGetUniformLocation(r->text_prog, "u_viewport"),    vw, vh);
+    glUniform2f(glGetUniformLocation(r->text_prog, "u_pane_offset"), ox, oy);
+    glUniform1f(glGetUniformLocation(r->text_prog, "u_ascender"),    (float)r->ascender);
+    glUniform1i(glGetUniformLocation(r->text_prog, "u_atlas"),       0);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, glyph_atlas_texture(r->atlas));
+
+    glBindVertexArray(r->text_vao);
     glDrawArraysInstanced(GL_TRIANGLES, 0, 6, 1);
     glBindVertexArray(0);
 
