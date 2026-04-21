@@ -135,8 +135,15 @@ static float g_context_menu_x = 0, g_context_menu_y = 0;
 static int      g_selecting = 0;      /* 드래그 중 */
 static int      g_has_selection = 0;  /* 선택 확정됨 */
 static uint32_t g_sel_pane = 0;
-static int      g_sel_sc = -1, g_sel_sr = -1; /* start col/row (pane-local) */
-static int      g_sel_ec = -1, g_sel_er = -1; /* end col/row (pane-local) */
+static int      g_sel_sc = -1, g_sel_ec = -1;   /* start/end col (pane-local) */
+static int64_t  g_sel_sr_li = -1, g_sel_er_li = -1; /* start/end 절대 행 인덱스(LI) */
+
+/* 드래그 앵커 — 최초 클릭 시점에 확정된 단위 범위.
+ * mode=0 cell, 1 word, 2 line. 드래그 중에는 이 앵커와 현재 마우스 위치의
+ * 단위 범위를 union 하여 선택 영역을 결정한다. */
+static int      g_sel_mode = 0;
+static int      g_anchor_sc = 0, g_anchor_ec = 0;
+static int64_t  g_anchor_sr_li = 0, g_anchor_er_li = 0;
 
 /* 더블/트리플 클릭 감지 — 같은 셀에서 300ms 이내 반복 클릭 카운트 */
 static long     g_last_click_ms = 0;
@@ -160,6 +167,39 @@ static int is_word_codepoint(uint32_t cp)
     if (cp >= 'A' && cp <= 'Z') return 1;
     if (cp >= 'a' && cp <= 'z') return 1;
     if (cp == '_') return 1;
+    return 0;
+}
+
+/* (li, col) 위치를 선택 단위(mode)에 맞게 확장.
+ *   mode 0 = 단일 셀: [col, col]
+ *   mode 1 = 단어: 워드 문자로 연결된 좌/우 최대 범위. 워드 아니면 단일 셀.
+ *   mode 2 = 라인: [0, cols-1] */
+static void expand_range(const screen_t *s, int64_t li, int col, int mode,
+                          int *out_sc, int *out_ec)
+{
+    int cols = s->cols;
+    if (mode == 2) { *out_sc = 0; *out_ec = cols - 1; return; }
+
+    const term_cell_t *row = screen_row_by_li(s, (uint64_t)li);
+    if (mode == 1 && row && col >= 0 && col < cols &&
+        is_word_codepoint(row[col].codepoint))
+    {
+        int sc = col, ec = col;
+        while (sc > 0 && is_word_codepoint(row[sc - 1].codepoint)) sc--;
+        while (ec < cols - 1 && is_word_codepoint(row[ec + 1].codepoint)) ec++;
+        *out_sc = sc; *out_ec = ec;
+        return;
+    }
+    *out_sc = *out_ec = col;
+}
+
+/* 두 위치(li, col) 를 lexicographic 비교. a<b 면 -1, a==b 면 0, a>b 면 +1. */
+static int pos_cmp(int64_t a_li, int a_col, int64_t b_li, int b_col)
+{
+    if (a_li < b_li) return -1;
+    if (a_li > b_li) return 1;
+    if (a_col < b_col) return -1;
+    if (a_col > b_col) return 1;
     return 0;
 }
 
@@ -461,7 +501,7 @@ static void do_close_pane(void)
 /* ── Copy / Paste / Resize ──────────────────────────────────────────────── */
 
 static char *selection_to_text(const screen_t *scr,
-                                int sc, int sr, int ec, int er);
+                                int sc, int64_t sr_li, int ec, int64_t er_li);
 
 static void do_copy_selection(void)
 {
@@ -469,7 +509,7 @@ static void do_copy_selection(void)
     pane_slot_t *ss = pane_slot_find(g_sel_pane);
     if (!ss) return;
     char *text = selection_to_text(&ss->screen,
-                                     g_sel_sc, g_sel_sr, g_sel_ec, g_sel_er);
+                                     g_sel_sc, g_sel_sr_li, g_sel_ec, g_sel_er_li);
     if (text) {
         glfwSetClipboardString(g_window, text);
         free(text);
@@ -632,41 +672,52 @@ static int keybind_matches(const char *binding, unsigned int mods, int glfw_key)
 
 /* ── 선택 텍스트 추출 ────────────────────────────────────────────────────── */
 
+/*
+ * 선택 영역에서 텍스트 추출. 행은 절대 행 인덱스(LI) 로 지정한다.
+ * 스크롤백 범위로 거슬러 올라간 선택도 동작한다.
+ */
 static char *selection_to_text(const screen_t *scr,
-                                int sc, int sr, int ec, int er)
+                                int sc, int64_t sr_li, int ec, int64_t er_li)
 {
-    /* 정규화 */
-    int r0, c0, r1, c1;
-    if (sr < er || (sr == er && sc <= ec)) {
-        r0 = sr; c0 = sc; r1 = er; c1 = ec;
+    /* 정규화: (r0, c0) <= (r1, c1) 가 되도록 */
+    int64_t r0_li, r1_li;
+    int c0, c1;
+    if (sr_li < er_li || (sr_li == er_li && sc <= ec)) {
+        r0_li = sr_li; c0 = sc; r1_li = er_li; c1 = ec;
     } else {
-        r0 = er; c0 = ec; r1 = sr; c1 = sc;
+        r0_li = er_li; c0 = ec; r1_li = sr_li; c1 = sc;
     }
 
-    const term_cell_t *cells = screen_get_cells((screen_t *)scr);
     int cols = scr->cols;
+    int64_t row_span = r1_li - r0_li + 1;
+    if (row_span <= 0 || row_span > 1000000) return NULL;  /* sanity */
 
-    /* 최대 크기 추정: 각 셀 최대 4바이트 UTF-8 + 행당 1바이트 \n */
-    size_t max_sz = (size_t)(r1 - r0 + 1) * (size_t)(cols * 4 + 1) + 1;
+    size_t max_sz = (size_t)row_span * (size_t)(cols * 4 + 1) + 1;
     char *buf = malloc(max_sz);
     if (!buf) return NULL;
     size_t pos = 0;
 
-    for (int row = r0; row <= r1; row++) {
-        int col_start = (row == r0) ? c0 : 0;
-        int col_end   = (row == r1) ? c1 : cols - 1;
+    for (int64_t li = r0_li; li <= r1_li; li++) {
+        const term_cell_t *row_cells = screen_row_by_li(scr, (uint64_t)li);
+        if (!row_cells) {
+            /* 유실된 줄 — 빈 줄로 스킵 */
+            if (li < r1_li && pos + 1 < max_sz) buf[pos++] = '\n';
+            continue;
+        }
+        int col_start = (li == r0_li) ? c0 : 0;
+        int col_end   = (li == r1_li) ? c1 : cols - 1;
 
-        /* trailing whitespace trim을 위해 마지막 non-space 찾기 */
+        /* trailing whitespace trim */
         int last_nonspace = col_start - 1;
         for (int col = col_start; col <= col_end; col++) {
-            const term_cell_t *cell = &cells[row * cols + col];
+            const term_cell_t *cell = &row_cells[col];
             if (cell->attrs & CELL_ATTR_WIDE_CONT) continue;
             uint32_t cp = cell->codepoint;
             if (cp && cp != ' ') last_nonspace = col;
         }
 
         for (int col = col_start; col <= last_nonspace; col++) {
-            const term_cell_t *cell = &cells[row * cols + col];
+            const term_cell_t *cell = &row_cells[col];
             if (cell->attrs & CELL_ATTR_WIDE_CONT) continue;
             uint32_t cp = cell->codepoint;
             if (!cp) cp = ' ';
@@ -678,12 +729,21 @@ static char *selection_to_text(const screen_t *scr,
             }
         }
 
-        /* 행 구분 (마지막 행 제외) */
-        if (row < r1 && pos + 1 < max_sz)
+        if (li < r1_li && pos + 1 < max_sz)
             buf[pos++] = '\n';
     }
     buf[pos] = '\0';
     return buf;
+}
+
+/* view row ↔ LI 변환 헬퍼 */
+static int64_t li_from_view_row(const screen_t *s, int view_row)
+{
+    return (int64_t)screen_scroll_epoch(s) + view_row - screen_scrollback_offset(s);
+}
+static int view_row_from_li(const screen_t *s, int64_t li)
+{
+    return (int)(li - (int64_t)screen_scroll_epoch(s) + screen_scrollback_offset(s));
 }
 
 /* ── Render pass ─────────────────────────────────────────────────────────── */
@@ -699,11 +759,20 @@ static void render_leaf_cb(layout_node_t *leaf, void *user)
     pane_rect_t prect = { leaf->rect.x, leaf->rect.y,
                            leaf->rect.w, leaf->rect.h };
 
-    /* 이 pane에 선택 영역이 있으면 전달, 없으면 -1 */
+    /* 이 pane에 선택 영역이 있으면 LI -> 현재 프레임의 view row 로 변환해 전달.
+     * 뷰포트 바깥이면 음수/rows 이상 값도 그대로 전달 — 렌더러가 일부 교차만
+     * 그린다. 전체 off-view 면 sentinel(-1)로 꺼둔다. */
     int ssc = -1, ssr = -1, sec = -1, ser = -1;
     if ((g_selecting || g_has_selection) && g_sel_pane == leaf->pane_id) {
-        ssc = g_sel_sc; ssr = g_sel_sr;
-        sec = g_sel_ec; ser = g_sel_er;
+        int rows = slot->screen.rows;
+        int vr_s = view_row_from_li(&slot->screen, g_sel_sr_li);
+        int vr_e = view_row_from_li(&slot->screen, g_sel_er_li);
+        int top = vr_s < vr_e ? vr_s : vr_e;
+        int bot = vr_s < vr_e ? vr_e : vr_s;
+        if (top < rows && bot >= 0) {   /* 뷰와 겹침 */
+            ssc = g_sel_sc; ssr = vr_s;
+            sec = g_sel_ec; ser = vr_e;
+        }
     }
     gl_renderer_draw_cells(ctx->render, screen_get_cells(&slot->screen),
                             slot->screen.cols, slot->screen.rows, prect,
@@ -898,7 +967,8 @@ static void key_callback(GLFWwindow *win, int key, int scancode,
     /* 키 입력 시 선택 해제 */
     if (g_has_selection) {
         g_has_selection = 0;
-        g_sel_sc = g_sel_sr = g_sel_ec = g_sel_er = -1;
+        g_sel_sc = g_sel_ec = -1;
+        g_sel_sr_li = g_sel_er_li = -1;
         g_dirty = 1;
     }
 
@@ -1133,59 +1203,51 @@ static void mouse_button_callback(GLFWwindow *win, int button, int action,
 
             g_sel_pane = g_active_pane;
 
-            if (g_click_count == 2 && active_slot) {
-                /* 단어 선택: 클릭 셀 기준으로 좌/우로 word boundary 확장 */
-                const term_cell_t *cells = screen_get_cells(&active_slot->screen);
-                int cols = active_slot->screen.cols;
-                if (is_word_codepoint(cells[local_y * cols + local_x].codepoint)) {
-                    int sc = local_x, ec = local_x;
-                    while (sc > 0 && is_word_codepoint(cells[local_y * cols + sc - 1].codepoint)) sc--;
-                    while (ec < cols - 1 && is_word_codepoint(cells[local_y * cols + ec + 1].codepoint)) ec++;
-                    g_sel_sc = sc; g_sel_sr = local_y;
-                    g_sel_ec = ec; g_sel_er = local_y;
-                } else {
-                    /* word 가 아니면 단일 셀만 선택 */
-                    g_sel_sc = g_sel_ec = local_x;
-                    g_sel_sr = g_sel_er = local_y;
-                }
-                g_selecting = 0;
-                g_has_selection = 1;
+            /* 클릭 시점의 LI (absolute row index) 계산 */
+            int64_t li = active_slot ? li_from_view_row(&active_slot->screen, local_y) : (int64_t)local_y;
+
+            /* 모드 결정: 1=cell, 2=word, 3=line → g_sel_mode 0/1/2 */
+            int mode = (g_click_count == 3) ? 2 : (g_click_count == 2 ? 1 : 0);
+            int anchor_sc = local_x, anchor_ec = local_x;
+            if (active_slot)
+                expand_range(&active_slot->screen, li, local_x, mode,
+                              &anchor_sc, &anchor_ec);
+
+            g_sel_mode = mode;
+            g_anchor_sc = anchor_sc; g_anchor_ec = anchor_ec;
+            g_anchor_sr_li = g_anchor_er_li = li;
+
+            g_sel_sc = anchor_sc; g_sel_ec = anchor_ec;
+            g_sel_sr_li = g_sel_er_li = li;
+
+            /* word/line 모드도 드래그로 확장 가능하도록 selecting 유지.
+             * 릴리즈 시점에 실제로 움직였는지 여부로 선택 확정 판단. */
+            g_selecting = 1;
+            g_has_selection = (mode != 0);  /* word/line 은 클릭 즉시 선택됨 */
+
+            if (mode != 0 && active_slot) {
+                /* word/line 은 클릭만으로 바로 클립보드 복사 */
                 char *text = selection_to_text(&active_slot->screen,
-                                                g_sel_sc, g_sel_sr, g_sel_ec, g_sel_er);
+                                                g_sel_sc, g_sel_sr_li,
+                                                g_sel_ec, g_sel_er_li);
                 if (text) { glfwSetClipboardString(win, text); free(text); }
-            } else if (g_click_count == 3 && active_slot) {
-                /* 라인 전체 선택 */
-                int cols = active_slot->screen.cols;
-                g_sel_sc = 0;
-                g_sel_ec = cols - 1;
-                g_sel_sr = g_sel_er = local_y;
-                g_selecting = 0;
-                g_has_selection = 1;
-                char *text = selection_to_text(&active_slot->screen,
-                                                g_sel_sc, g_sel_sr, g_sel_ec, g_sel_er);
-                if (text) { glfwSetClipboardString(win, text); free(text); }
-            } else {
-                /* 단일 클릭: 기존 드래그 선택 시작 */
-                g_selecting = 1;
-                g_has_selection = 0;
-                g_sel_sc = local_x; g_sel_sr = local_y;
-                g_sel_ec = local_x; g_sel_er = local_y;
             }
             g_dirty = 1;
         } else {
-            /* 릴리즈: 드래그 중이었으면 선택 확정 + 클립보드 복사 */
+            /* 릴리즈: 드래그 확정. 실제 드래그는 cursor_pos_callback 에서
+             * 이미 g_sel_* 에 반영됐다. 여기선 최종 상태에 따라 클립보드만 갱신. */
             if (g_selecting) {
                 g_selecting = 0;
-                g_sel_ec = local_x; g_sel_er = local_y;
-                /* 같은 위치 클릭이면 선택 해제 */
-                if (g_sel_sc == g_sel_ec && g_sel_sr == g_sel_er) {
+                /* cell 모드에서 같은 셀 클릭으로 끝났으면 선택 해제 */
+                if (g_sel_mode == 0 &&
+                    g_sel_sc == g_sel_ec && g_sel_sr_li == g_sel_er_li) {
                     g_has_selection = 0;
                 } else {
                     g_has_selection = 1;
                     pane_slot_t *ss = pane_slot_find(g_sel_pane);
                     if (ss) {
                         char *text = selection_to_text(&ss->screen,
-                            g_sel_sc, g_sel_sr, g_sel_ec, g_sel_er);
+                            g_sel_sc, g_sel_sr_li, g_sel_ec, g_sel_er_li);
                         if (text) {
                             glfwSetClipboardString(win, text);
                             free(text);
@@ -1251,25 +1313,48 @@ static void scroll_callback(GLFWwindow *win, double xoff, double yoff)
 static void cursor_pos_callback(GLFWwindow *win, double xpos, double ypos)
 {
     (void)win;
-    /* 드래그 중이면 선택 끝점 업데이트 (선택 pane 로컬 좌표) */
-    if (g_selecting) {
-        int fw = font_cell_width(g_font);
-        int fh = font_cell_height(g_font);
-        layout_node_t *leaf = layout_find_pane(g_layout, g_sel_pane);
-        if (!leaf) return;
-        int lx = ((int)xpos - leaf->rect.x) / fw;
-        int ly = ((int)ypos - leaf->rect.y) / fh;
-        pane_slot_t *ss = pane_slot_find(g_sel_pane);
-        if (ss) {
-            if (lx < 0) lx = 0;
-            if (ly < 0) ly = 0;
-            if (lx >= ss->screen.cols) lx = ss->screen.cols - 1;
-            if (ly >= ss->screen.rows) ly = ss->screen.rows - 1;
-        }
-        g_sel_ec = lx;
-        g_sel_er = ly;
-        g_dirty = 1;
+    if (!g_selecting) return;
+
+    int fw = font_cell_width(g_font);
+    int fh = font_cell_height(g_font);
+    layout_node_t *leaf = layout_find_pane(g_layout, g_sel_pane);
+    if (!leaf) return;
+    pane_slot_t *ss = pane_slot_find(g_sel_pane);
+    if (!ss) return;
+
+    int lx = ((int)xpos - leaf->rect.x) / fw;
+    int ly = ((int)ypos - leaf->rect.y) / fh;
+    if (lx < 0) lx = 0;
+    if (ly < 0) ly = 0;
+    if (lx >= ss->screen.cols) lx = ss->screen.cols - 1;
+    if (ly >= ss->screen.rows) ly = ss->screen.rows - 1;
+
+    int64_t mouse_li = li_from_view_row(&ss->screen, ly);
+
+    /* 마우스 위치의 단위 범위를 mode 에 맞춰 확장 */
+    int mouse_sc, mouse_ec;
+    expand_range(&ss->screen, mouse_li, lx, g_sel_mode, &mouse_sc, &mouse_ec);
+
+    /* 앵커와 mouse 의 범위를 union — 시작은 더 이른 쪽, 끝은 더 늦은 쪽.
+     * word/line 모드에서 마우스가 앵커를 지나치면 끝이 확장, 앵커 반대편으로
+     * 넘어가면 반대 방향으로 확장. */
+    int64_t sr_li, er_li;
+    int sc, ec;
+    if (pos_cmp(g_anchor_sr_li, g_anchor_sc, mouse_li, mouse_sc) <= 0) {
+        sr_li = g_anchor_sr_li; sc = g_anchor_sc;
+    } else {
+        sr_li = mouse_li; sc = mouse_sc;
     }
+    if (pos_cmp(g_anchor_er_li, g_anchor_ec, mouse_li, mouse_ec) >= 0) {
+        er_li = g_anchor_er_li; ec = g_anchor_ec;
+    } else {
+        er_li = mouse_li; ec = mouse_ec;
+    }
+
+    g_sel_sc = sc; g_sel_sr_li = sr_li;
+    g_sel_ec = ec; g_sel_er_li = er_li;
+    g_has_selection = 1;
+    g_dirty = 1;
 }
 
 static void framebuffer_size_callback(GLFWwindow *win, int width, int height)
@@ -1760,7 +1845,7 @@ int main(int argc, char *argv[])
                                     pane_slot_t *ss = pane_slot_find(g_sel_pane);
                                     if (ss) {
                                         char *text = selection_to_text(&ss->screen,
-                                            g_sel_sc, g_sel_sr, g_sel_ec, g_sel_er);
+                                            g_sel_sc, g_sel_sr_li, g_sel_ec, g_sel_er_li);
                                         if (text) {
                                             glfwSetClipboardString(g_window, text);
                                             free(text);

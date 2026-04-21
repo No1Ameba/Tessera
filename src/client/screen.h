@@ -43,6 +43,12 @@ typedef struct {
     int          sb_offset;   /* 0 = 현재 화면, N > 0 = N줄 과거로 */
     term_cell_t *view_cells;  /* sb_offset > 0 시 합성된 뷰 버퍼 */
 
+    /* 누적 scrollback push 카운트 — 라이브 스크린이 위로 밀려 첫 행이
+     * 스크롤백으로 들어간 총 횟수. 행의 절대 인덱스 (Line Index / LI) 는
+     * scroll_epoch + live_row_index 로 계산되어, 스크롤이 발생해도 같은
+     * 행에 stable 하게 머무른다 (선택 영역 앵커링 용). */
+    uint64_t     scroll_epoch;
+
     /* 커서 */
     int cx, cy;
     int saved_cx, saved_cy;
@@ -147,6 +153,21 @@ int screen_cursor_y(const screen_t *s);
 
 /* 커서를 화면 밖으로 가리킬 때 숨길지 여부 (0=표시, 1=숨김). */
 int screen_cursor_hidden(const screen_t *s);
+
+/* ── 절대 행 인덱스 (LI = Line Index) API ─────────────────────────────────── */
+
+/*
+ * 라이브 스크린이 위로 밀려 첫 행이 스크롤백으로 들어간 누적 횟수.
+ * 현재 라이브 스크린 row R 의 LI = screen_scroll_epoch(s) + R.
+ * 현재 라이브 top 의 LI = screen_scroll_epoch(s).
+ */
+uint64_t screen_scroll_epoch(const screen_t *s);
+
+/*
+ * 절대 행 인덱스 li 에 해당하는 cell row 포인터 반환.
+ * li 가 라이브 스크린/스크롤백 범위를 벗어나 유실된 경우 NULL.
+ */
+const term_cell_t *screen_row_by_li(const screen_t *s, uint64_t li);
 
 /* 커서 스타일 (CURSOR_STYLE_*). */
 int screen_cursor_style(const screen_t *s);
