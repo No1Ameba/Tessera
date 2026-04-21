@@ -135,8 +135,33 @@ static float g_context_menu_x = 0, g_context_menu_y = 0;
 static int      g_selecting = 0;      /* 드래그 중 */
 static int      g_has_selection = 0;  /* 선택 확정됨 */
 static uint32_t g_sel_pane = 0;
-static int      g_sel_sc = -1, g_sel_sr = -1; /* start col/row */
-static int      g_sel_ec = -1, g_sel_er = -1; /* end col/row */
+static int      g_sel_sc = -1, g_sel_sr = -1; /* start col/row (pane-local) */
+static int      g_sel_ec = -1, g_sel_er = -1; /* end col/row (pane-local) */
+
+/* 더블/트리플 클릭 감지 — 같은 셀에서 300ms 이내 반복 클릭 카운트 */
+static long     g_last_click_ms = 0;
+static uint32_t g_last_click_pane = 0;
+static int      g_last_click_col = -1, g_last_click_row = -1;
+static int      g_click_count = 0;
+
+static long now_ms_mono(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+/* 워드 문자 판정 — ASCII 알파넘+_ 이상, non-ASCII 는 단어로 간주 (CJK 등). */
+static int is_word_codepoint(uint32_t cp)
+{
+    if (cp == 0) return 0;
+    if (cp >= 0x80) return 1;
+    if (cp >= '0' && cp <= '9') return 1;
+    if (cp >= 'A' && cp <= 'Z') return 1;
+    if (cp >= 'a' && cp <= 'z') return 1;
+    if (cp == '_') return 1;
+    return 0;
+}
 
 /* 설정 재로드 플래그 */
 static volatile sig_atomic_t g_sighup = 0;
@@ -1075,19 +1100,83 @@ static void mouse_button_callback(GLFWwindow *win, int button, int action,
         if (slen > 0)
             ipc_client_pty_input(g_client, g_active_pane, seq, (size_t)slen);
     } else if (button == GLFW_MOUSE_BUTTON_LEFT) {
-        /* 좌클릭: 텍스트 선택 */
+        /* 좌클릭: 텍스트 선택. 좌표는 클릭한 pane 의 로컬 셀 좌표. */
+        layout_node_t *leaf = layout_find_pane(g_layout, g_active_pane);
+        int local_x = 0, local_y = 0;
+        if (leaf) {
+            local_x = ((int)mx - leaf->rect.x) / fw;
+            local_y = ((int)my - leaf->rect.y) / fh;
+            if (local_x < 0) local_x = 0;
+            if (local_y < 0) local_y = 0;
+            if (active_slot) {
+                if (local_x >= active_slot->screen.cols) local_x = active_slot->screen.cols - 1;
+                if (local_y >= active_slot->screen.rows) local_y = active_slot->screen.rows - 1;
+            }
+        }
+
         if (press) {
-            g_selecting = 1;
-            g_has_selection = 0;
+            /* 더블/트리플 클릭 감지 */
+            long now = now_ms_mono();
+            int same_cell = (g_last_click_pane == g_active_pane &&
+                              g_last_click_col == local_x &&
+                              g_last_click_row == local_y);
+            if (same_cell && (now - g_last_click_ms) < 300) {
+                g_click_count++;
+                if (g_click_count > 3) g_click_count = 1;
+            } else {
+                g_click_count = 1;
+            }
+            g_last_click_ms   = now;
+            g_last_click_pane = g_active_pane;
+            g_last_click_col  = local_x;
+            g_last_click_row  = local_y;
+
             g_sel_pane = g_active_pane;
-            g_sel_sc = cell_x; g_sel_sr = cell_y;
-            g_sel_ec = cell_x; g_sel_er = cell_y;
+
+            if (g_click_count == 2 && active_slot) {
+                /* 단어 선택: 클릭 셀 기준으로 좌/우로 word boundary 확장 */
+                const term_cell_t *cells = screen_get_cells(&active_slot->screen);
+                int cols = active_slot->screen.cols;
+                if (is_word_codepoint(cells[local_y * cols + local_x].codepoint)) {
+                    int sc = local_x, ec = local_x;
+                    while (sc > 0 && is_word_codepoint(cells[local_y * cols + sc - 1].codepoint)) sc--;
+                    while (ec < cols - 1 && is_word_codepoint(cells[local_y * cols + ec + 1].codepoint)) ec++;
+                    g_sel_sc = sc; g_sel_sr = local_y;
+                    g_sel_ec = ec; g_sel_er = local_y;
+                } else {
+                    /* word 가 아니면 단일 셀만 선택 */
+                    g_sel_sc = g_sel_ec = local_x;
+                    g_sel_sr = g_sel_er = local_y;
+                }
+                g_selecting = 0;
+                g_has_selection = 1;
+                char *text = selection_to_text(&active_slot->screen,
+                                                g_sel_sc, g_sel_sr, g_sel_ec, g_sel_er);
+                if (text) { glfwSetClipboardString(win, text); free(text); }
+            } else if (g_click_count == 3 && active_slot) {
+                /* 라인 전체 선택 */
+                int cols = active_slot->screen.cols;
+                g_sel_sc = 0;
+                g_sel_ec = cols - 1;
+                g_sel_sr = g_sel_er = local_y;
+                g_selecting = 0;
+                g_has_selection = 1;
+                char *text = selection_to_text(&active_slot->screen,
+                                                g_sel_sc, g_sel_sr, g_sel_ec, g_sel_er);
+                if (text) { glfwSetClipboardString(win, text); free(text); }
+            } else {
+                /* 단일 클릭: 기존 드래그 선택 시작 */
+                g_selecting = 1;
+                g_has_selection = 0;
+                g_sel_sc = local_x; g_sel_sr = local_y;
+                g_sel_ec = local_x; g_sel_er = local_y;
+            }
             g_dirty = 1;
         } else {
-            /* 릴리즈: 선택 확정 + 클립보드 복사 */
+            /* 릴리즈: 드래그 중이었으면 선택 확정 + 클립보드 복사 */
             if (g_selecting) {
                 g_selecting = 0;
-                g_sel_ec = cell_x; g_sel_er = cell_y;
+                g_sel_ec = local_x; g_sel_er = local_y;
                 /* 같은 위치 클릭이면 선택 해제 */
                 if (g_sel_sc == g_sel_ec && g_sel_sr == g_sel_er) {
                     g_has_selection = 0;
@@ -1162,12 +1251,23 @@ static void scroll_callback(GLFWwindow *win, double xoff, double yoff)
 static void cursor_pos_callback(GLFWwindow *win, double xpos, double ypos)
 {
     (void)win;
-    /* 드래그 중이면 선택 끝점 업데이트 */
+    /* 드래그 중이면 선택 끝점 업데이트 (선택 pane 로컬 좌표) */
     if (g_selecting) {
         int fw = font_cell_width(g_font);
         int fh = font_cell_height(g_font);
-        g_sel_ec = (int)xpos / fw;
-        g_sel_er = (int)ypos / fh;
+        layout_node_t *leaf = layout_find_pane(g_layout, g_sel_pane);
+        if (!leaf) return;
+        int lx = ((int)xpos - leaf->rect.x) / fw;
+        int ly = ((int)ypos - leaf->rect.y) / fh;
+        pane_slot_t *ss = pane_slot_find(g_sel_pane);
+        if (ss) {
+            if (lx < 0) lx = 0;
+            if (ly < 0) ly = 0;
+            if (lx >= ss->screen.cols) lx = ss->screen.cols - 1;
+            if (ly >= ss->screen.rows) ly = ss->screen.rows - 1;
+        }
+        g_sel_ec = lx;
+        g_sel_er = ly;
         g_dirty = 1;
     }
 }
