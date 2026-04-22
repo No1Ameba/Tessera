@@ -1,5 +1,6 @@
 #include "settings_ui.h"
 #include "file_picker.h"
+#include "ui_overlay.h"
 
 #define NK_INCLUDE_FIXED_TYPES
 #define NK_INCLUDE_STANDARD_IO
@@ -457,11 +458,20 @@ int settings_ui_draw(struct nk_context *ctx,
                       termemu_config_t *cfg,
                       termemu_theme_t *theme,
                       const char *cfg_path,
-                      const char *theme_path)
+                      const char *theme_path,
+                      float win_w, float win_h)
 {
     int modified = 0;
 
-    if (!nk_begin(ctx, "Settings", nk_rect(50, 50, 480, 520),
+    /* 초기 rect 는 화면 비율 기반. 이후는 Nuklear 가 사용자 조정치(MOVABLE/SCALABLE) 유지. */
+    float sx, sy, sw, sh;
+    ui_overlay_centered_rect(win_w, win_h,
+                              0.55f, 0.75f,
+                              520.0f, 820.0f,
+                              520.0f, 880.0f,
+                              &sx, &sy, &sw, &sh);
+
+    if (!nk_begin(ctx, "Settings", nk_rect(sx, sy, sw, sh),
                   NK_WINDOW_BORDER | NK_WINDOW_MOVABLE | NK_WINDOW_SCALABLE |
                   NK_WINDOW_TITLE | NK_WINDOW_CLOSABLE))
     {
@@ -472,13 +482,27 @@ int settings_ui_draw(struct nk_context *ctx,
     /* ── 탭 헤더 ── */
     draw_tabs(ctx);
 
-    /* ── 탭 내용 ── */
-    switch (g_active_tab) {
-    case 0: tab_font(ctx, cfg); break;
-    case 1: tab_window(ctx, cfg); break;
-    case 2: tab_keybindings(ctx, cfg); break;
-    case 3: tab_colors(ctx, theme); break;
-    case 4: tab_export(ctx, cfg, theme, cfg_path, theme_path); break;
+    /* ── 탭 내용을 스크롤 group 으로 감싼다.
+     * 창의 content region 에서 탭 헤더/하단 버튼 영역을 제외한 나머지를 group 높이로 잡아
+     * 창 크기가 변해도 탭 내용이 리플로우되고, 내용이 넘치면 세로 스크롤된다. */
+    struct nk_rect content = nk_window_get_content_region(ctx);
+    float sp          = ctx->style.window.spacing.y;
+    float tabs_used   = 30.0f + sp + 4.0f + sp;      /* draw_tabs 의 두 행 + trailing spacing */
+    float footer_used = 8.0f  + sp + 35.0f + sp;     /* spacer + 버튼 행 + trailing spacing */
+    float group_row_pad = sp + sp;                    /* group row 앞뒤 spacing */
+    float group_h = content.h - tabs_used - footer_used - group_row_pad;
+    if (group_h < 60.0f) group_h = 60.0f;
+
+    nk_layout_row_dynamic(ctx, group_h, 1);
+    if (nk_group_begin(ctx, "settings_tab_body", NK_WINDOW_BORDER)) {
+        switch (g_active_tab) {
+        case 0: tab_font(ctx, cfg); break;
+        case 1: tab_window(ctx, cfg); break;
+        case 2: tab_keybindings(ctx, cfg); break;
+        case 3: tab_colors(ctx, theme); break;
+        case 4: tab_export(ctx, cfg, theme, cfg_path, theme_path); break;
+        }
+        nk_group_end(ctx);
     }
 
     /* ── 하단 버튼 ── */

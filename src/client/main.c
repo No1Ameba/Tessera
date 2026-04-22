@@ -37,6 +37,7 @@
 #include "ui/nk_impl.h"
 #include "ui/settings_ui.h"
 #include "ui/confirm_dialog.h"
+#include "ui/ui_overlay.h"
 
 /* Nuklear 선언만 (NK_IMPLEMENTATION 없이) — 컨텍스트 메뉴에서 직접 사용 */
 #define NK_INCLUDE_FIXED_TYPES
@@ -1278,15 +1279,10 @@ static void mouse_button_callback(GLFWwindow *win, int button, int action,
     int mode_pre = active_slot_pre ? screen_mouse_mode(&active_slot_pre->screen) : 0;
     if (press && button == GLFW_MOUSE_BUTTON_RIGHT && mode_pre == SCREEN_MOUSE_NONE) {
         g_show_context_menu = 1;
-        /* 창 가장자리에 걸려 가려지지 않도록 flip/clamp. 메뉴 크기 = 180x250. */
-        const float mw = 180.0f, mh = 250.0f;
-        float x = (float)mx, y = (float)my;
-        if (x + mw > (float)g_win_w) x -= mw;          /* 오른쪽 모서리 → 왼쪽으로 */
-        if (y + mh > (float)g_win_h) y -= mh;          /* 아래쪽 모서리 → 위로   */
-        if (x < 0) x = 0;
-        if (y < 0) y = 0;
-        g_context_menu_x = x;
-        g_context_menu_y = y;
+        /* 앵커 좌표만 저장 — 화면 경계 clamp 는 렌더 시점(`ui_overlay_popup_at`)에서 수행.
+         * 렌더 쪽으로 미루면 창 리사이즈/폰트 변경에도 메뉴가 자동 재위치한다. */
+        g_context_menu_x = (float)mx;
+        g_context_menu_y = (float)my;
         g_dirty = 1;
         nk_impl_reset_input();
         return;
@@ -2001,8 +1997,35 @@ int main(int argc, char *argv[])
 
                     /* ── 우클릭 컨텍스트 메뉴 (복사/붙여넣기 + 분할 + 설정) ── */
                     if (g_show_context_menu) {
+                        /* 버튼 수 × 행 높이 기반으로 메뉴 높이를 동적 계산.
+                         * 폰트 크기/라벨 길이 변화 + 화면 경계 clamp 자동. */
+                        const int   btn_count = 6;
+                        const float btn_h     = 28.0f;
+                        float spacing_y = g_nk_ctx->style.window.spacing.y;
+                        float wp_y      = g_nk_ctx->style.window.padding.y;
+                        float font_h    = (g_nk_ctx->style.font &&
+                                            g_nk_ctx->style.font->height > 0)
+                                           ? g_nk_ctx->style.font->height : 16.0f;
+                        float header_h  = font_h
+                                        + 2.0f * g_nk_ctx->style.window.header.label_padding.y
+                                        + 2.0f * g_nk_ctx->style.window.header.padding.y;
+                        if (header_h < 28.0f) header_h = 28.0f;
+                        float menu_w = 220.0f;
+                        float menu_h = header_h + 4.0f /* border */ + 2.0f * wp_y
+                                     + (float)btn_count * btn_h
+                                     + (float)(btn_count - 1) * spacing_y
+                                     + 6.0f;
+
+                        int fbw_m, fbh_m;
+                        glfwGetFramebufferSize(g_window, &fbw_m, &fbh_m);
+                        float cx, cy, cw, ch;
+                        ui_overlay_popup_at(g_context_menu_x, g_context_menu_y,
+                                             menu_w, menu_h,
+                                             (float)fbw_m, (float)fbh_m,
+                                             &cx, &cy, &cw, &ch);
+
                         int ctx_open = nk_begin(g_nk_ctx, "ctx_menu",
-                                     nk_rect(g_context_menu_x, g_context_menu_y, 180, 250),
+                                     nk_rect(cx, cy, cw, ch),
                                      NK_WINDOW_BORDER | NK_WINDOW_TITLE | NK_WINDOW_NO_SCROLLBAR);
                         if (ctx_open) {
                             nk_layout_row_dynamic(g_nk_ctx, 28, 1);
@@ -2130,8 +2153,11 @@ int main(int argc, char *argv[])
 
                     /* ── 설정 오버레이 ── */
                     if (g_show_settings) {
+                        int fbw_s, fbh_s;
+                        glfwGetFramebufferSize(g_window, &fbw_s, &fbh_s);
                         int result = settings_ui_draw(g_nk_ctx, &cfg, &theme,
-                                                       g_cfg_path, g_theme_path);
+                                                       g_cfg_path, g_theme_path,
+                                                       (float)fbw_s, (float)fbh_s);
                         if (result == 1)
                             do_config_reload();
                         else if (result == -1)
