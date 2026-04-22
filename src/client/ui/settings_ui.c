@@ -263,6 +263,23 @@ static void tab_window(struct nk_context *ctx, termemu_config_t *cfg)
     nk_checkbox_label(ctx, blink ? "On" : "Off", &blink);
     cfg->cursor_blink = blink ? true : false;
     nk_layout_row_end(ctx);
+
+    /* ── Confirm on close (파괴적 동작 확인 팝업) ─────────────────────────── */
+    nk_layout_row_dynamic(ctx, 8, 1);
+    nk_spacing(ctx, 1);
+    nk_layout_row_dynamic(ctx, 20, 1);
+    nk_label(ctx, "Confirm before closing:", NK_TEXT_LEFT);
+
+    int c_pane    = cfg->confirm_close_pane    ? 1 : 0;
+    int c_window  = cfg->confirm_close_window  ? 1 : 0;
+    int c_session = cfg->confirm_close_session ? 1 : 0;
+    nk_layout_row_dynamic(ctx, 24, 1);
+    nk_checkbox_label(ctx, "Pane",    &c_pane);
+    nk_checkbox_label(ctx, "Window",  &c_window);
+    nk_checkbox_label(ctx, "Session", &c_session);
+    cfg->confirm_close_pane    = c_pane    ? true : false;
+    cfg->confirm_close_window  = c_window  ? true : false;
+    cfg->confirm_close_session = c_session ? true : false;
 }
 
 static void tab_keybindings(struct nk_context *ctx, termemu_config_t *cfg)

@@ -104,6 +104,17 @@
 - 렌더링: CELL_ATTR_UNDERLINE 자동 부여 + 렌더러 underline pass 추가.
 - 클라이언트: Ctrl+Click → `xdg-open` / `open` 으로 URL 실행.
 
+### 닫기 확인 팝업 (2026-04-22)
+- 파괴적 동작(`do_close_pane` / 마지막 pane → 세션 종료 / X 버튼 창 닫기) 에 Nuklear 모달 팝업 삽입.
+- `src/client/ui/confirm_dialog.{c,h}` — 싱글톤 모달. Cancel/Close 버튼 + "Don't ask again" 체크박스 +
+  Esc/Enter = 취소 (기본 포커스 Cancel). 승인 시 콜백 호출.
+- `termemu_config_t` 에 `confirm_close_pane` / `confirm_close_window` / `confirm_close_session` bool 추가
+  (기본 true). JSON key: `confirm.{pane,window,session}`.
+- `glfwSetWindowCloseCallback` 으로 X 버튼 가로채 세션 확인으로 분기. 피커 취소 등 세션 생성 이전 단계는
+  곧바로 종료.
+- `PANE_EXITED` 자동 경로는 기존대로 팝업 없이 진행(사용자 능동 액션에만 확인).
+- `window` 확인은 #18 다중 window 구현 시 훅 연결 예정 (config/설정 UI 에는 이미 노출).
+
 ### split 단축키 키리피트 가드 (2026-04-22)
 - `key_callback` 이 `GLFW_PRESS` / `GLFW_REPEAT` 구분 없이 단축키를 디스패치해 `Alt+-` / `Alt+=` 를 잠깐만 눌러도 OS 키리피트로 `do_split` 이 rapid-fire 발사되어 수많은 초소형 pane 이 생성 → "동기화된 것처럼" 보이던 문제 수정.
 - edge-triggered 액션(`split_*`, `close_pane`, `focus_*`, `copy`, `paste`, `preferences`) 은 `GLFW_PRESS` 에만 디스패치, `GLFW_REPEAT` 는 consume 만 하고 drop. 반복이 자연스러운 `resize_*` / `scroll_*` 은 기존대로 유지.
@@ -222,7 +233,7 @@
       - `src/common/config.c` — 테마 필드 추가 + 토글 옵션.
       - `src/client/ui/settings_ui.c` — 상태바 관련 설정.
 
-20. [ ] **닫기 확인 팝업 (pane / window / session)**
+20. [x] **닫기 확인 팝업 (pane / window / session)** ✅ (Nuklear 모달 + config 3 bool, 2026-04-22)
     - 파괴적 동작에 대해 Nuklear 모달 팝업으로 "정말 닫을까요?" 확인.
     - 적용 지점:
       - **Pane 닫기** (`Ctrl + W` / 기존 단축키, `do_close_pane`) — 닫으려는 pane 의

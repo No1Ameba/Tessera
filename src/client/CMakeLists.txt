@@ -12,6 +12,7 @@ if(TERMEMU_BUILD_APPS)
         ui/nk_impl.c
         ui/settings_ui.c
         ui/file_picker.c
+        ui/confirm_dialog.c
     )
 
     target_include_directories(termemu PRIVATE

@@ -171,6 +171,9 @@ void config_defaults(termemu_config_t *cfg) {
     cfg->bell_visual      = false;
     cfg->autosave_interval    = 300;  /* 기본 5분 */
     cfg->session_idle_timeout = 300;  /* 기본 5분: detach 후 세션 유지 기간 */
+    cfg->confirm_close_pane    = true;
+    cfg->confirm_close_window  = true;
+    cfg->confirm_close_session = true;
 
     keybindings_t *kb = &cfg->keybindings;
     strncpy(kb->split_vertical,   "Alt+minus",   sizeof(kb->split_vertical) - 1);
@@ -296,6 +299,17 @@ bool config_load_string(const char *json, termemu_config_t *cfg) {
         }
     }
 
+    /* confirm (파괴적 동작 확인 팝업) */
+    sub = cJSON_GetObjectItemCaseSensitive(root, "confirm");
+    if (cJSON_IsObject(sub)) {
+        item = cJSON_GetObjectItemCaseSensitive(sub, "pane");
+        if (cJSON_IsBool(item)) cfg->confirm_close_pane = cJSON_IsTrue(item);
+        item = cJSON_GetObjectItemCaseSensitive(sub, "window");
+        if (cJSON_IsBool(item)) cfg->confirm_close_window = cJSON_IsTrue(item);
+        item = cJSON_GetObjectItemCaseSensitive(sub, "session");
+        if (cJSON_IsBool(item)) cfg->confirm_close_session = cJSON_IsTrue(item);
+    }
+
     /* keybindings */
     sub = cJSON_GetObjectItemCaseSensitive(root, "keybindings");
     if (cJSON_IsObject(sub)) {
@@ -376,6 +390,13 @@ bool config_save_file(const char *path, const termemu_config_t *cfg) {
     cJSON_AddNumberToObject(daemon_obj, "autosave_interval",    cfg->autosave_interval);
     cJSON_AddNumberToObject(daemon_obj, "session_idle_timeout", cfg->session_idle_timeout);
     cJSON_AddItemToObject(root, "daemon", daemon_obj);
+
+    /* confirm */
+    cJSON *confirm = cJSON_CreateObject();
+    cJSON_AddBoolToObject(confirm, "pane",    cfg->confirm_close_pane);
+    cJSON_AddBoolToObject(confirm, "window",  cfg->confirm_close_window);
+    cJSON_AddBoolToObject(confirm, "session", cfg->confirm_close_session);
+    cJSON_AddItemToObject(root, "confirm", confirm);
 
     /* keybindings */
     const keybindings_t *kb = &cfg->keybindings;

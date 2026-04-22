@@ -36,6 +36,7 @@
 #include "ui/input.h"
 #include "ui/nk_impl.h"
 #include "ui/settings_ui.h"
+#include "ui/confirm_dialog.h"
 
 /* Nuklear 선언만 (NK_IMPLEMENTATION 없이) — 컨텍스트 메뉴에서 직접 사용 */
 #define NK_INCLUDE_FIXED_TYPES
@@ -502,7 +503,9 @@ static void do_split(layout_node_type_t dir)
     push_layout_to_daemon();
 }
 
-static void do_close_pane(void)
+/* 실제 pane destroy 수행. 확인 팝업을 거치지 않으므로 직접 부르지 말고
+ * do_close_pane() 을 거친다. */
+static void close_pane_now(void)
 {
     if (!g_layout || !g_client) return;
 
@@ -554,6 +557,105 @@ static void do_close_pane(void)
     }
     g_dirty = 1;
     push_layout_to_daemon();
+}
+
+/* leaf 개수 카운트 헬퍼 */
+static void count_leaf_cb(layout_node_t *leaf, void *u)
+{
+    (void)leaf;
+    (*(int *)u)++;
+}
+
+static int layout_leaf_count(void)
+{
+    int n = 0;
+    if (g_layout) layout_each_leaf(g_layout, count_leaf_cb, &n);
+    return n;
+}
+
+/* confirm 콜백 — 승인 시 실제 닫기 수행 */
+static void confirm_close_pane_cb(void *user)    { (void)user; close_pane_now(); }
+static void confirm_close_session_cb(void *user)
+{
+    (void)user;
+    /* 세션 종료 = 앱 종료. 메인 루프가 내려오도록 플래그를 내린다. */
+    if (g_window) glfwSetWindowShouldClose(g_window, 1);
+    g_running = 0;
+}
+
+/* do_close_pane — 외부에서 호출되는 진입점. 확인 팝업이 필요하면 연다. */
+static void do_close_pane(void)
+{
+    if (!g_layout || !g_client) return;
+    if (!layout_find_pane(g_layout, g_active_pane)) return;
+    if (confirm_dialog_is_open()) return;  /* 중첩 방지 */
+
+    int leaves = layout_leaf_count();
+
+    /* 이 pane 이 마지막이면 = 세션 종료 경로 */
+    if (leaves <= 1) {
+        if (g_cfg_ptr && g_cfg_ptr->confirm_close_session) {
+            confirm_dialog_open(CONFIRM_KIND_SESSION,
+                "Close Session?",
+                "이것이 마지막 pane 입니다.\n"
+                "닫으면 이 세션과 모든 pane 이 종료됩니다.",
+                &g_cfg_ptr->confirm_close_session,
+                confirm_close_session_cb, NULL);
+            return;
+        }
+        close_pane_now();
+        return;
+    }
+
+    if (g_cfg_ptr && g_cfg_ptr->confirm_close_pane) {
+        pane_slot_t *dying = pane_slot_find(g_active_pane);
+        const char *title = dying ? screen_get_title(&dying->screen) : "";
+        char body[384];
+        snprintf(body, sizeof body,
+                 "현재 pane 을 닫습니다.\npane_id=%u%s%s",
+                 g_active_pane,
+                 (title && title[0]) ? "\n" : "",
+                 (title && title[0]) ? title : "");
+        confirm_dialog_open(CONFIRM_KIND_PANE,
+            "Close Pane?", body,
+            &g_cfg_ptr->confirm_close_pane,
+            confirm_close_pane_cb, NULL);
+        return;
+    }
+    close_pane_now();
+}
+
+/* 앱(세션) 종료 요청 — X 버튼 / 외부 close. 확인 팝업 분기. */
+static void request_app_close(void)
+{
+    if (confirm_dialog_is_open()) return;
+    /* 아직 세션이 만들어지지 않은 초기 단계(피커 취소 등)는 곧바로 종료. */
+    if (g_session_id == 0 || g_window_id == 0 || !g_layout) {
+        if (g_window) glfwSetWindowShouldClose(g_window, 1);
+        return;
+    }
+    if (g_cfg_ptr && g_cfg_ptr->confirm_close_session) {
+        int leaves = layout_leaf_count();
+        char body[256];
+        snprintf(body, sizeof body,
+                 "이 세션과 모든 pane 이 종료됩니다.\n현재 pane 개수: %d",
+                 leaves);
+        confirm_dialog_open(CONFIRM_KIND_SESSION,
+            "Close Session?", body,
+            &g_cfg_ptr->confirm_close_session,
+            confirm_close_session_cb, NULL);
+        return;
+    }
+    if (g_window) glfwSetWindowShouldClose(g_window, 1);
+    g_running = 0;
+}
+
+/* GLFW 창 닫기 콜백 — 확인 팝업이 필요하면 shouldClose 를 되돌린다. */
+static void window_close_callback(GLFWwindow *win)
+{
+    /* 일단 확인을 거쳐야 하므로 close 플래그 취소. */
+    glfwSetWindowShouldClose(win, 0);
+    request_app_close();
 }
 
 /* ── Copy / Paste / Resize ──────────────────────────────────────────────── */
@@ -1690,6 +1792,7 @@ int main(int argc, char *argv[])
     glfwSetScrollCallback(g_window, scroll_callback);
     glfwSetCursorPosCallback(g_window, cursor_pos_callback);
     glfwSetFramebufferSizeCallback(g_window, framebuffer_size_callback);
+    glfwSetWindowCloseCallback(g_window, window_close_callback);
 
     /* ── Font + atlas + renderer ─────────────────────────────────────────── */
     char font_resolved[512] = {0};
@@ -2033,6 +2136,13 @@ int main(int argc, char *argv[])
                             do_config_reload();
                         else if (result == -1)
                             g_show_settings = 0;
+                    }
+
+                    /* ── 닫기 확인 모달 ── */
+                    {
+                        int fbw, fbh;
+                        glfwGetFramebufferSize(g_window, &fbw, &fbh);
+                        confirm_dialog_draw(g_nk_ctx, g_window, fbw, fbh);
                     }
 
                     nk_impl_render();
