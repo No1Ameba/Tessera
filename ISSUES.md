@@ -2,7 +2,40 @@
 
 ## Open
 
-(현재 없음)
+### [UX] 우클릭 컨텍스트 메뉴 · 설정창 반응형 레이아웃 (2026-04-22)
+
+**현상**:
+- 우클릭 컨텍스트 메뉴(`main.c` 의 `"ctx_menu"` Nuklear 창) 가 고정 크기 `180x250` 로 생성됨. 폰트 크기·언어 에 따라 버튼 라벨이 잘리거나 메뉴가 화면 밖으로 나갈 수 있음.
+- 설정창(`settings_ui_draw`) 도 `nk_rect(50, 50, 480, 520)` 고정. 작은 화면에서는 잘리고, 큰 화면에서는 상대적으로 작아 읽기 어려움. 내용에 따라 세로 스크롤이 필요할 때도 고정 높이라 일부 필드가 안 보임.
+- 창 리사이즈(`framebuffer_size_callback`) 시에도 두 UI 는 초기 rect 를 유지하기만 함.
+
+**기대 동작**: 확인 팝업(`ui/confirm_dialog.c`) 에 적용한 것처럼
+1. 기준 크기를 화면 비율로 계산 (min/max clamp).
+2. 내용 area 는 `nk_group` + 스크롤로 감싸 오버플로우 시 스크롤.
+3. 컨텍스트 메뉴는 클릭 위치가 화면 밖으로 벗어나지 않도록 `(x, y)` 를 재위치시키는 로직 추가.
+4. 설정창은 탭 내용물 전체를 스크롤 group 으로 감싸 세로 리플로우 보장.
+
+**영향 파일**:
+- `src/client/main.c` (컨텍스트 메뉴 rect 계산)
+- `src/client/ui/settings_ui.c` (`nk_begin` rect / 각 탭의 group 구성)
+- 필요 시 공통 헬퍼를 `ui/` 에 추출 (`ui_overlay_rect(...)` 같은 것)
+
+**우선순위**: 중 — 기능은 동작하지만 UX 품질 이슈. 확인 팝업 작업에서 같은 패턴을 검증한 상태이므로 재사용 가능.
+
+### [BUG] Nuklear 오버레이(설정/확인 팝업)에서 한글 깨짐 (2026-04-22)
+
+**증상**: `Ctrl+,` 설정창, 닫기 확인 팝업, 우클릭 컨텍스트 메뉴 등 Nuklear 로 그리는 UI 레이어의 한글 문자열이 깨져서 (□ / 공백) 표시됨. 터미널 셀 렌더링(`gl_renderer`) 쪽 한글은 정상.
+
+**원인 추정**: `nk_impl_init()` 에서 `nk_font_atlas_add_from_file()` 로 TTF 를 올릴 때 기본 ASCII glyph range(`nk_font_default_glyph_ranges()`, 0x20–0xFF) 만 baked 됨. CJK/한글 코드포인트는 아틀라스에 없어 렌더 시 .notdef 로 폴백. 또한 현재 UI 폰트는 `resolve_font_path("monospace")` 로 받은 첫 매칭 — 한글 지원이 없는 라틴 전용 폰트일 가능성이 큼.
+
+**해결 방향(미착수)**:
+- `nk_font_config` 에 한글 glyph range 추가 — `{0x0020, 0x00FF, 0xAC00, 0xD7A3, 0x3000, 0x303F, 0x3130, 0x318F, 0}` 정도. 아틀라스 크기도 늘려야 함 (현재 atlas 는 Nuklear 기본값).
+- UI 폰트 폴백 체인: 한글 지원 폰트(Noto Sans CJK KR, Nanum Gothic 등) 가 있으면 그걸로 베이킹, 없으면 경고 + 라틴만.
+- 설정에 `ui.font_family` 추가해 사용자가 한글 폰트 지정 가능하게.
+
+**영향 파일**: `src/client/ui/nk_impl.c` (init · 폰트 베이킹), `src/client/main.c` (`nk_impl_init` 호출부 폰트 경로).
+
+**우선순위**: 중 — 기능 자체는 동작하지만 UX 품질에 큰 영향. 한국어 시스템에서 설정창/확인 팝업/메뉴 문구가 본문 텍스트에서도 영향 받음.
 
 ---
 
