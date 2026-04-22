@@ -463,12 +463,13 @@ int settings_ui_draw(struct nk_context *ctx,
 {
     int modified = 0;
 
-    /* 초기 rect 는 화면 비율 기반. 이후는 Nuklear 가 사용자 조정치(MOVABLE/SCALABLE) 유지. */
+    /* 초기 rect 는 화면 비율 기반. 이후는 Nuklear 가 사용자 조정치(MOVABLE/SCALABLE) 유지.
+     * min h 는 하단 버튼 행 + tabs + 최소 탭 콘텐츠가 충분히 들어갈 크기로 넉넉히 둔다. */
     float sx, sy, sw, sh;
     ui_overlay_centered_rect(win_w, win_h,
-                              0.55f, 0.75f,
+                              0.55f, 0.80f,
                               520.0f, 820.0f,
-                              520.0f, 880.0f,
+                              600.0f, 900.0f,
                               &sx, &sy, &sw, &sh);
 
     /* NO_SCROLLBAR — 외부 창은 스크롤 없이 고정 영역으로 두고, 탭 내용 group 만 스크롤.
@@ -486,13 +487,26 @@ int settings_ui_draw(struct nk_context *ctx,
 
     /* ── 탭 내용을 스크롤 group 으로 감싼다.
      * 창의 content region 에서 탭 헤더/하단 버튼 영역을 제외한 나머지를 group 높이로 잡아
-     * 창 크기가 변해도 탭 내용이 리플로우되고, 내용이 넘치면 세로 스크롤된다. */
+     * 창 크기가 변해도 탭 내용이 리플로우되고, 내용이 넘치면 세로 스크롤된다.
+     *
+     * confirm_dialog 의 trailing-spacer 패턴과 동일하게 버튼 뒤에 여유 spacer 를 두어
+     * 계산 오차(SCALABLE grip, 스타일 padding 추정치) 로 인한 하단 잘림을 흡수한다. */
+    const float tabs_row_h     = 30.0f;
+    const float tabs_spacer_h  = 4.0f;
+    const float footer_spacer  = 8.0f;
+    const float footer_btn_h   = 35.0f;
+    const float trailing_spacer = 8.0f;
+
     struct nk_rect content = nk_window_get_content_region(ctx);
-    float sp          = ctx->style.window.spacing.y;
-    float tabs_used   = 30.0f + sp + 4.0f + sp;      /* draw_tabs 의 두 행 + trailing spacing */
-    float footer_used = 8.0f  + sp + 35.0f + sp;     /* spacer + 버튼 행 + trailing spacing */
-    float group_row_pad = sp + sp;                    /* group row 앞뒤 spacing */
-    float group_h = content.h - tabs_used - footer_used - group_row_pad;
+    float sp = ctx->style.window.spacing.y;
+
+    /* row 수 총합: tabs(2) + group(1) + footer(2) + trailing(1) = 6 행, 행 사이 spacing = 5 × sp */
+    float fixed_h = tabs_row_h + tabs_spacer_h
+                  + footer_spacer + footer_btn_h + trailing_spacer
+                  + 5.0f * sp
+                  + 10.0f;  /* 스타일 추정치 오차 흡수용 safety margin */
+
+    float group_h = content.h - fixed_h;
     if (group_h < 60.0f) group_h = 60.0f;
 
     nk_layout_row_dynamic(ctx, group_h, 1);
@@ -508,9 +522,9 @@ int settings_ui_draw(struct nk_context *ctx,
     }
 
     /* ── 하단 버튼 ── */
-    nk_layout_row_dynamic(ctx, 8, 1);
+    nk_layout_row_dynamic(ctx, footer_spacer, 1);
     nk_spacing(ctx, 1);
-    nk_layout_row_dynamic(ctx, 35, 3);
+    nk_layout_row_dynamic(ctx, footer_btn_h, 3);
     if (nk_button_label(ctx, "Save & Apply")) {
         if (cfg_path && cfg_path[0])
             config_save_file(cfg_path, cfg);
@@ -526,6 +540,10 @@ int settings_ui_draw(struct nk_context *ctx,
         config_defaults(cfg);
         theme_defaults(theme);
     }
+
+    /* trailing spacer — 계산 오차로 하단이 잘려야 할 경우 버튼 대신 이 spacer 가 먼저 잘리도록. */
+    nk_layout_row_dynamic(ctx, trailing_spacer, 1);
+    nk_spacing(ctx, 1);
 
     nk_end(ctx);
     return modified;
