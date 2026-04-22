@@ -180,6 +180,69 @@
     - attach/new/import 경로의 초기 pane 은 parent=0 으로 남지만, 재접속 상태에서도
       sibling fallback 으로 자연스러운 포커스 이동이 가능.
 
+### 다중 Window / 상태바 (2026-04-22 추가)
+18. [ ] **다중 Window 관리 및 단축키**
+    - 현재 구조는 session → window → pane 이지만, client 에서 window 는 사실상 1 개만
+      활성 상태로 쓰고 있음. 다중 window 를 사용자가 직접 생성·전환·닫을 수 있게 한다.
+    - 단축키:
+      - `Ctrl + Alt + H` / `Ctrl + Alt + L` — 이전/다음 window 로 전환.
+      - `Ctrl + Alt + 1` ~ `Ctrl + Alt + 0` — 1~10 번 window 로 직접 이동.
+      - `Ctrl + Alt + N` — 새 window 생성 (현재 세션에 추가).
+      - `Ctrl + Alt + W` — 현재 window 닫기. 마지막 window 를 닫으면 세션 전체가
+        종료되므로 항목 20 의 확인 팝업을 띄운다.
+    - 영향 범위:
+      - `src/daemon/session.c/h` — window 추가/삭제/전환 API 확장 (대부분 이미 존재 가능).
+      - `src/common/ipc_proto.h` — `WINDOW_NEW` / `WINDOW_CLOSE` / `WINDOW_SELECT` 메시지
+        (이미 있다면 재사용, 없으면 추가).
+      - `src/client/ipc_client.c` — 래퍼 함수.
+      - `src/client/main.c` — active window 전환 시 layout/g_panes/포커스 교체.
+      - `src/client/ui/input.c` — 단축키 매핑 추가.
+    - 재접속/복원 시나리오: 스냅샷(`save_all_sessions`)에 다중 window 포함 확인.
+    - 다중 클라이언트 환경에서 window 전환의 broadcast 정책: 클라이언트별 로컬인지 공유인지
+      결정 필요 (기본은 클라이언트별 로컬이 자연스러움).
+
+19. [ ] **창 하단 상태바 UI (vim-airline 스타일)**
+    - 창 맨 하단에 고정 높이의 status bar 렌더링.
+    - 표시 항목 (초안):
+      - 현재 session 이름 / id.
+      - window 목록 — `[1:shell] 2:vim* 3:logs` 형태, 활성 window 하이라이트,
+        dirty/활동 표시 (* 등).
+      - 활성 pane 정보 — pid, 크기(rows×cols), 커서 위치 옵션.
+      - 모드 / 상태 — copy 모드, paste 모드, 원격 연결 여부 등.
+      - 시계 (옵션), 설정 토글 상태.
+    - 렌더링 방식: 기존 `gl_renderer` 의 cell 레이어 위에 별도 pass 로 그리거나,
+      레이아웃 계산 시 하단 1~2 행을 reserved 로 예약 (pane rect 계산 시 제외).
+      → 설계 시 어느 쪽이 더 깔끔할지 검토.
+    - 테마 연동: 팔레트에 `statusbar_bg` / `statusbar_fg` / `statusbar_active_*`
+      추가, theme import/export 호환 유지.
+    - 표시 on/off 토글 (설정 UI + 단축키).
+    - 영향 범위:
+      - `src/client/renderer/gl_renderer.c/h` — 상태바 렌더 pass.
+      - `src/client/main.c` — viewport / layout rect 계산에서 상태바 영역 예약.
+      - `src/common/config.c` — 테마 필드 추가 + 토글 옵션.
+      - `src/client/ui/settings_ui.c` — 상태바 관련 설정.
+
+20. [ ] **닫기 확인 팝업 (pane / window / session)**
+    - 파괴적 동작에 대해 Nuklear 모달 팝업으로 "정말 닫을까요?" 확인.
+    - 적용 지점:
+      - **Pane 닫기** (`Ctrl + W` / 기존 단축키, `do_close_pane`) — 닫으려는 pane 의
+        PTY pid 와 커맨드를 표기.
+      - **Window 닫기** (`Ctrl + Alt + W`, 항목 18) — window 에 속한 pane 개수 표시.
+      - **Session 종료** — 마지막 window 를 닫거나, 앱 종료 시 세션이 destroy 되는
+        경로. "이 세션과 모든 pane 이 종료됩니다" 문구 + pane 개수.
+    - 버튼: `닫기` / `취소`. 기본 포커스는 `취소` (엔터로 실수 방지), Esc = 취소.
+    - 옵션:
+      - "다시 묻지 않기" 체크박스 → config (`confirm_close_pane` / `confirm_close_window`
+        / `confirm_close_session` 각각 bool) 에 기록.
+      - 설정 UI 에서 개별 on/off 가능.
+    - 이미 종료 중인 pane (셸 `exit` 로 PANE_EXITED 수신) 은 확인 팝업 없이 그대로 닫는다
+      — 팝업은 사용자 능동 액션에만.
+    - 영향 범위:
+      - `src/client/ui/nk_impl.c` / `settings_ui.c` — 모달 팝업 구현.
+      - `src/client/main.c` — `do_close_pane` / window close / session close 경로에
+        확인 단계 삽입, "확인됨" 콜백에서 실제 IPC 호출.
+      - `src/common/config.c/h` — 세 개 bool 필드 추가 + 저장/로드.
+
 ---
 
 ## 테스트 빌드 및 실행 방법
