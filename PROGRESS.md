@@ -104,6 +104,10 @@
 - 렌더링: CELL_ATTR_UNDERLINE 자동 부여 + 렌더러 underline pass 추가.
 - 클라이언트: Ctrl+Click → `xdg-open` / `open` 으로 URL 실행.
 
+### split 단축키 키리피트 가드 (2026-04-22)
+- `key_callback` 이 `GLFW_PRESS` / `GLFW_REPEAT` 구분 없이 단축키를 디스패치해 `Alt+-` / `Alt+=` 를 잠깐만 눌러도 OS 키리피트로 `do_split` 이 rapid-fire 발사되어 수많은 초소형 pane 이 생성 → "동기화된 것처럼" 보이던 문제 수정.
+- edge-triggered 액션(`split_*`, `close_pane`, `focus_*`, `copy`, `paste`, `preferences`) 은 `GLFW_PRESS` 에만 디스패치, `GLFW_REPEAT` 는 consume 만 하고 drop. 반복이 자연스러운 `resize_*` / `scroll_*` 은 기존대로 유지.
+
 ---
 
 ## TODO (우선순위 순)
