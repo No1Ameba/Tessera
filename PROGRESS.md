@@ -168,17 +168,13 @@
     - Config Import / Export, Theme Import / Export 에서 공통 사용.
 
 ### 포커스 / 창 관리
-17. [ ] **pane 닫힘 시 포커스를 부모(자신을 만든 pane)로 이동**
-    - 현상: pane 닫으면 포커스가 맨 처음 생성된 pane(`g_panes[]` 의 첫 used 슬롯)으로 이동.
-      `on_pane_exited` / `do_close_pane` 의 next pane 선택이 pane_slot 배열 순회로만
-      결정되기 때문.
-    - 기대: 닫힌 pane 을 만들 때의 "부모" pane 으로 포커스가 돌아가야 사용자 동선이 자연스럽다.
-    - 영향 범위:
-      - 옵션 A: layout 트리의 sibling 탐색 — 닫힌 leaf 와 같은 parent split 의 형제 leaf.
-        직관적이지만 "원래 부모" 와 다를 수 있음 (split 방향/깊이에 따라).
-      - 옵션 B: `pane_slot_t` 에 `parent_pane_id` 필드 추가. split 시 기록해두고 닫힐 때 복귀.
-        의도와 가장 잘 맞음. `do_split` / `on_pane_split` 에서 세팅.
-    - 우선 옵션 B 로 구현 검토.
+17. [x] **pane 닫힘 시 포커스를 부모(자신을 만든 pane)로 이동** ✅ (옵션 B, 2026-04-22)
+    - `pane_slot_t` 에 `parent_pane_id` 필드 추가. `do_split` 은 `g_active_pane`,
+      `on_pane_split` 은 notify 의 `parent_pane_id` 값을 기록.
+    - `on_pane_exited` / `do_close_pane` 는 먼저 parent_pane_id 가 살아있으면 그쪽으로,
+      아니면 기존 배열 순회 fallback.
+    - attach/new/import 경로의 초기 pane 은 parent=0 (부모 없음) 으로 유지 —
+      fallback 동작이 기존과 동일.
 
 ---
 
