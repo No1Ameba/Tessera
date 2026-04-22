@@ -471,9 +471,11 @@ int settings_ui_draw(struct nk_context *ctx,
                               520.0f, 880.0f,
                               &sx, &sy, &sw, &sh);
 
+    /* NO_SCROLLBAR — 외부 창은 스크롤 없이 고정 영역으로 두고, 탭 내용 group 만 스크롤.
+     * 두 군데 모두 스크롤이 생기면 이중 스크롤이 되어 조작이 혼란스러움. */
     if (!nk_begin(ctx, "Settings", nk_rect(sx, sy, sw, sh),
                   NK_WINDOW_BORDER | NK_WINDOW_MOVABLE | NK_WINDOW_SCALABLE |
-                  NK_WINDOW_TITLE | NK_WINDOW_CLOSABLE))
+                  NK_WINDOW_TITLE | NK_WINDOW_CLOSABLE | NK_WINDOW_NO_SCROLLBAR))
     {
         nk_end(ctx);
         return -1;
