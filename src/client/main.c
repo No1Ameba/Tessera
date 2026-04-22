@@ -1054,13 +1054,15 @@ static void key_callback(GLFWwindow *win, int key, int scancode,
         const keybindings_t *kb = &g_cfg_ptr->keybindings;
 
         if (keybind_matches(kb->preferences, mod_flags, key)) {
-            g_show_settings = !g_show_settings;
-            if (g_show_settings) {
-                nk_impl_show_window("Settings", 1);
-                nk_impl_reset_input();
+            if (action == GLFW_PRESS) {
+                g_show_settings = !g_show_settings;
+                if (g_show_settings) {
+                    nk_impl_show_window("Settings", 1);
+                    nk_impl_reset_input();
+                }
+                g_dirty = 1;
             }
             g_key_consumed = 1;
-            g_dirty = 1;
             return;
         }
 
@@ -1069,24 +1071,28 @@ static void key_callback(GLFWwindow *win, int key, int scancode,
 
         pane_slot_t *as = pane_slot_find(g_active_pane);
 
+        /* split/close/focus/copy/paste 는 edge-triggered — OS 키리피트로
+         * 연속 발사되면 짧은 시간에 pane 이 쏟아져 "동기화된 것처럼" 보이므로
+         * REPEAT 는 consume 만 하고 drop 한다. resize/scroll 은 아래에서 반복 허용. */
+        int is_press = (action == GLFW_PRESS);
         if (keybind_matches(kb->split_vertical,   mod_flags, key))
-            { do_split(LAYOUT_SPLIT_H); g_key_consumed = 1; return; }
+            { if (is_press) do_split(LAYOUT_SPLIT_H); g_key_consumed = 1; return; }
         if (keybind_matches(kb->split_horizontal, mod_flags, key))
-            { do_split(LAYOUT_SPLIT_V); g_key_consumed = 1; return; }
+            { if (is_press) do_split(LAYOUT_SPLIT_V); g_key_consumed = 1; return; }
         if (keybind_matches(kb->focus_left,       mod_flags, key))
-            { do_focus(0); g_key_consumed = 1; return; }
+            { if (is_press) do_focus(0); g_key_consumed = 1; return; }
         if (keybind_matches(kb->focus_right,      mod_flags, key))
-            { do_focus(1); g_key_consumed = 1; return; }
+            { if (is_press) do_focus(1); g_key_consumed = 1; return; }
         if (keybind_matches(kb->focus_up,         mod_flags, key))
-            { do_focus(2); g_key_consumed = 1; return; }
+            { if (is_press) do_focus(2); g_key_consumed = 1; return; }
         if (keybind_matches(kb->focus_down,       mod_flags, key))
-            { do_focus(3); g_key_consumed = 1; return; }
+            { if (is_press) do_focus(3); g_key_consumed = 1; return; }
         if (keybind_matches(kb->close_pane,       mod_flags, key))
-            { do_close_pane(); g_key_consumed = 1; return; }
+            { if (is_press) do_close_pane(); g_key_consumed = 1; return; }
         if (keybind_matches(kb->copy,             mod_flags, key))
-            { do_copy_selection(); g_key_consumed = 1; return; }
+            { if (is_press) do_copy_selection(); g_key_consumed = 1; return; }
         if (keybind_matches(kb->paste,            mod_flags, key))
-            { do_paste_clipboard(); g_key_consumed = 1; return; }
+            { if (is_press) do_paste_clipboard(); g_key_consumed = 1; return; }
         if (keybind_matches(kb->resize_left,      mod_flags, key))
             { do_resize_pane(0); g_key_consumed = 1; return; }
         if (keybind_matches(kb->resize_right,     mod_flags, key))
