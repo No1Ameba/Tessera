@@ -53,6 +53,7 @@
 
 typedef struct {
     uint32_t  pane_id;
+    uint32_t  parent_pane_id;  /* 이 pane 을 만든 부모 pane (0 = 없음). 닫힐 때 포커스 복귀용 */
     screen_t  screen;
     int       used;
 } pane_slot_t;
@@ -81,8 +82,9 @@ static pane_slot_t *pane_slot_alloc(uint32_t pane_id, int cols, int rows)
     int sb = g_scrollback_lines > 0 ? g_scrollback_lines : 1000;
     for (int i = 0; i < MAX_PANES; i++) {
         if (!g_panes[i].used) {
-            g_panes[i].pane_id = pane_id;
-            g_panes[i].used    = 1;
+            g_panes[i].pane_id        = pane_id;
+            g_panes[i].parent_pane_id = 0;
+            g_panes[i].used           = 1;
             screen_init(&g_panes[i].screen, cols, rows, sb);
             return &g_panes[i];
         }
@@ -255,12 +257,22 @@ static void on_pane_exited(uint32_t pane_id, void *user)
     (void)user;
 
     if (pane_id == g_active_pane) {
-        for (int i = 0; i < MAX_PANES; i++) {
-            if (g_panes[i].used && g_panes[i].pane_id != pane_id) {
-                g_active_pane = g_panes[i].pane_id;
-                break;
+        uint32_t next = 0;
+        /* 닫힌 pane 을 만든 부모 pane 이 살아있으면 그쪽으로 포커스 복귀 */
+        pane_slot_t *dying = pane_slot_find(pane_id);
+        if (dying && dying->parent_pane_id) {
+            pane_slot_t *par = pane_slot_find(dying->parent_pane_id);
+            if (par && par->pane_id != pane_id) next = par->pane_id;
+        }
+        if (!next) {
+            for (int i = 0; i < MAX_PANES; i++) {
+                if (g_panes[i].used && g_panes[i].pane_id != pane_id) {
+                    next = g_panes[i].pane_id;
+                    break;
+                }
             }
         }
+        g_active_pane = next;
     }
 
     /* 죽는 pane 에 선택 영역이 있었으면 초기화 (stale reference 제거) */
@@ -351,6 +363,7 @@ static void on_pane_split(uint32_t session_id, uint32_t window_id,
 
     pane_slot_t *ns = pane_slot_alloc(new_pane_id, new_nc, new_nr);
     if (ns) {
+        ns->parent_pane_id = parent_pane_id;
         if (g_theme) screen_apply_theme(&ns->screen, g_theme);
         screen_set_clipboard_cb(&ns->screen, on_clipboard_set, NULL);
     }
@@ -458,6 +471,7 @@ static void do_split(layout_node_type_t dir)
     {
         pane_slot_t *ns = pane_slot_alloc(new_pane_id, new_nc, new_nr);
         if (ns) {
+            ns->parent_pane_id = g_active_pane;
             if (g_theme) screen_apply_theme(&ns->screen, g_theme);
             screen_set_clipboard_cb(&ns->screen, on_clipboard_set, NULL);
         }
@@ -475,10 +489,18 @@ static void do_close_pane(void)
     if (!node) return;
 
     uint32_t next_pane = 0;
-    for (int i = 0; i < MAX_PANES; i++) {
-        if (g_panes[i].used && g_panes[i].pane_id != g_active_pane) {
-            next_pane = g_panes[i].pane_id;
-            break;
+    /* 닫힌 pane 을 만든 부모 pane 이 살아있으면 그쪽으로 포커스 복귀 */
+    pane_slot_t *dying = pane_slot_find(g_active_pane);
+    if (dying && dying->parent_pane_id) {
+        pane_slot_t *par = pane_slot_find(dying->parent_pane_id);
+        if (par && par->pane_id != g_active_pane) next_pane = par->pane_id;
+    }
+    if (!next_pane) {
+        for (int i = 0; i < MAX_PANES; i++) {
+            if (g_panes[i].used && g_panes[i].pane_id != g_active_pane) {
+                next_pane = g_panes[i].pane_id;
+                break;
+            }
         }
     }
 
