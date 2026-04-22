@@ -152,16 +152,37 @@ struct nk_context *nk_impl_init(GLFWwindow *win,
     nk_gl_create_shaders();
     nk_gl_create_buffers();
 
-    /* Font baking */
+    /* Font baking — UI 오버레이(설정/확인/컨텍스트 메뉴) 에서 한글·라틴을 모두 표시해야 하므로
+     * CJK glyph range 를 함께 베이킹한다. range 가 지정된 폰트 파일에 해당 glyph 가 없으면
+     * 해당 코드포인트는 .notdef 로 폴백하므로 호출측에서 한글 지원 폰트를 전달해야 한다. */
+    static const nk_rune ui_ranges[] = {
+        0x0020, 0x00FF,  /* Basic Latin + Latin-1 Supplement */
+        0x2000, 0x206F,  /* General Punctuation (—, …, 따옴표) */
+        0x3000, 0x303F,  /* CJK Symbols and Punctuation */
+        0x3130, 0x318F,  /* Hangul Compatibility Jamo */
+        0xAC00, 0xD7A3,  /* Hangul Syllables */
+        0xFF00, 0xFFEF,  /* Halfwidth/Fullwidth Forms */
+        0
+    };
+
     nk_font_atlas_init_default(&nk_gl.atlas);
     nk_font_atlas_begin(&nk_gl.atlas);
+
+    struct nk_font_config cfg = nk_font_config(font_size);
+    cfg.range        = ui_ranges;
+    cfg.oversample_h = 1;   /* CJK 로 atlas 가 크게 불어나지 않도록 oversample 최소화 */
+    cfg.oversample_v = 1;
+    cfg.pixel_snap   = 1;
 
     struct nk_font *font = NULL;
     if (font_path) {
         font = nk_font_atlas_add_from_file(&nk_gl.atlas, font_path,
-                                            font_size, NULL);
+                                            font_size, &cfg);
     }
     if (!font) {
+        /* 한글 포함 폰트 로드 실패 시 기본 폰트로 폴백 — 한글은 깨지지만 UI 는 동작 */
+        fprintf(stderr, "[nk_impl] UI font '%s' load failed — CJK glyphs will be missing\n",
+                font_path ? font_path : "(null)");
         font = nk_font_atlas_add_default(&nk_gl.atlas, font_size, NULL);
     }
 

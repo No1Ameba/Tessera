@@ -438,6 +438,48 @@ static const char *resolve_font_path(const char *name, char *buf, size_t bufsz)
     return name;
 }
 
+/* Nuklear 오버레이 UI 용 폰트 경로 해석 — 라틴+한글을 한 폰트에 베이킹해야 하므로
+ * 한글 지원 TTF 후보를 우선 탐색한다. Noto Sans CJK 는 TTC 묶음인데 Nuklear 내부의
+ * stbtt_InitFont 가 첫 face(일반적으로 JP) 만 로드하므로 TTC 는 최후 수단으로만 사용. */
+static const char *resolve_ui_font_path(char *buf, size_t bufsz)
+{
+    static const char *ttf_candidates[] = {
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+        "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
+        "/usr/share/fonts/truetype/nanum/NanumGothicCoding.ttf",
+        "/usr/share/fonts/opentype/source-han-sans/SourceHanSansKR-Regular.otf",
+        "C:\\Windows\\Fonts\\malgun.ttf",
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+        NULL
+    };
+    for (int i = 0; ttf_candidates[i]; i++) {
+        FILE *f = fopen(ttf_candidates[i], "rb");
+        if (f) { fclose(f); return ttf_candidates[i]; }
+    }
+#ifndef _WIN32
+    /* fc-match 로 한글 지원 폰트 탐색 — TTC 는 피하고 TTF 만 선택 */
+    FILE *p = popen("fc-match --format='%{file}\n' ':lang=ko'"
+                     " 2>/dev/null", "r");
+    if (p) {
+        size_t n = fread(buf, 1, bufsz - 1, p);
+        pclose(p);
+        if (n > 0) {
+            buf[n] = '\0';
+            while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r' || buf[n-1] == ' '))
+                buf[--n] = '\0';
+            const char *ext = strrchr(buf, '.');
+            int is_ttf = ext && (strcmp(ext, ".ttf") == 0 || strcmp(ext, ".TTF") == 0 ||
+                                   strcmp(ext, ".otf") == 0 || strcmp(ext, ".OTF") == 0);
+            if (is_ttf) {
+                FILE *f = fopen(buf, "rb");
+                if (f) { fclose(f); return buf; }
+            }
+        }
+    }
+#endif
+    return NULL;  /* 한글 지원 폰트 없음 — 호출측에서 기본 폰트로 폴백 */
+}
+
 /* ── Split helpers ───────────────────────────────────────────────────────── */
 
 static void do_split(layout_node_type_t dir)
@@ -1818,7 +1860,13 @@ int main(int argc, char *argv[])
     }
 
     /* ── Nuklear 초기화 ──────────────────────────────────────────────────── */
-    g_nk_ctx = nk_impl_init(g_window, font_path, 16.0f);
+    /* UI 오버레이(설정/확인/컨텍스트 메뉴) 는 한글 라벨을 표시하므로 CJK 지원 폰트를 별도로
+     * 해석한다. 없으면 터미널용 폰트 그대로 사용 (한글은 .notdef 폴백). */
+    char ui_font_resolved[512] = {0};
+    const char *ui_font_path = resolve_ui_font_path(ui_font_resolved,
+                                                      sizeof ui_font_resolved);
+    if (!ui_font_path) ui_font_path = font_path;
+    g_nk_ctx = nk_impl_init(g_window, ui_font_path, 16.0f);
 
     /* ── IPC connect ─────────────────────────────────────────────────────── */
     g_client = ipc_client_create(on_pty_output, NULL);
