@@ -252,18 +252,39 @@ static void on_pty_output(uint32_t pane_id, const uint8_t *data, size_t len,
 static void push_layout_to_daemon(void);
 static void compute_layout_rect(int *x, int *y, int *w, int *h);
 
+/* 주어진 leaf 와 같은 split 의 형제 subtree 에서 첫 leaf 반환.
+ * parent_pane_id 가 없을 때(세션 재접속 등)의 포커스 복귀 fallback. */
+static layout_node_t *find_sibling_leaf(layout_node_t *leaf)
+{
+    if (!leaf || !leaf->parent) return NULL;
+    layout_node_t *p   = leaf->parent;
+    layout_node_t *sib = (p->children[0] == leaf) ? p->children[1]
+                                                   : p->children[0];
+    while (sib && sib->type != LAYOUT_LEAF) {
+        sib = sib->children[0] ? sib->children[0] : sib->children[1];
+    }
+    return sib;
+}
+
 static void on_pane_exited(uint32_t pane_id, void *user)
 {
     (void)user;
 
     if (pane_id == g_active_pane) {
         uint32_t next = 0;
-        /* 닫힌 pane 을 만든 부모 pane 이 살아있으면 그쪽으로 포커스 복귀 */
+        /* 1순위: 닫힌 pane 을 만든 부모 pane 이 살아있으면 그쪽으로 복귀 */
         pane_slot_t *dying = pane_slot_find(pane_id);
         if (dying && dying->parent_pane_id) {
             pane_slot_t *par = pane_slot_find(dying->parent_pane_id);
             if (par && par->pane_id != pane_id) next = par->pane_id;
         }
+        /* 2순위: layout 트리의 형제 subtree (세션 재접속 등 parent 정보 유실 시) */
+        if (!next) {
+            layout_node_t *cur = layout_find_pane(g_layout, pane_id);
+            layout_node_t *sib = find_sibling_leaf(cur);
+            if (sib && sib->pane_id != pane_id) next = sib->pane_id;
+        }
+        /* 3순위: g_panes 배열 순회 fallback */
         if (!next) {
             for (int i = 0; i < MAX_PANES; i++) {
                 if (g_panes[i].used && g_panes[i].pane_id != pane_id) {
@@ -489,12 +510,18 @@ static void do_close_pane(void)
     if (!node) return;
 
     uint32_t next_pane = 0;
-    /* 닫힌 pane 을 만든 부모 pane 이 살아있으면 그쪽으로 포커스 복귀 */
+    /* 1순위: 닫힌 pane 을 만든 부모 pane 이 살아있으면 그쪽으로 복귀 */
     pane_slot_t *dying = pane_slot_find(g_active_pane);
     if (dying && dying->parent_pane_id) {
         pane_slot_t *par = pane_slot_find(dying->parent_pane_id);
         if (par && par->pane_id != g_active_pane) next_pane = par->pane_id;
     }
+    /* 2순위: layout 트리의 형제 subtree (세션 재접속 등 parent 정보 유실 시) */
+    if (!next_pane) {
+        layout_node_t *sib = find_sibling_leaf(node);
+        if (sib && sib->pane_id != g_active_pane) next_pane = sib->pane_id;
+    }
+    /* 3순위: g_panes 배열 순회 fallback */
     if (!next_pane) {
         for (int i = 0; i < MAX_PANES; i++) {
             if (g_panes[i].used && g_panes[i].pane_id != g_active_pane) {

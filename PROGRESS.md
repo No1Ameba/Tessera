@@ -168,13 +168,13 @@
     - Config Import / Export, Theme Import / Export 에서 공통 사용.
 
 ### 포커스 / 창 관리
-17. [x] **pane 닫힘 시 포커스를 부모(자신을 만든 pane)로 이동** ✅ (옵션 B, 2026-04-22)
+17. [x] **pane 닫힘 시 포커스를 부모(자신을 만든 pane)로 이동** ✅ (옵션 B + 옵션 A fallback, 2026-04-22)
     - `pane_slot_t` 에 `parent_pane_id` 필드 추가. `do_split` 은 `g_active_pane`,
       `on_pane_split` 은 notify 의 `parent_pane_id` 값을 기록.
-    - `on_pane_exited` / `do_close_pane` 는 먼저 parent_pane_id 가 살아있으면 그쪽으로,
-      아니면 기존 배열 순회 fallback.
-    - attach/new/import 경로의 초기 pane 은 parent=0 (부모 없음) 으로 유지 —
-      fallback 동작이 기존과 동일.
+    - `on_pane_exited` / `do_close_pane` 선택 순서: (1) parent_pane_id, (2) layout
+      tree 의 형제 leaf (세션 재접속 시 parent 정보 유실 보완), (3) g_panes 배열.
+    - attach/new/import 경로의 초기 pane 은 parent=0 으로 남지만, 재접속 상태에서도
+      sibling fallback 으로 자연스러운 포커스 이동이 가능.
 
 ---
 
