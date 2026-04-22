@@ -82,6 +82,9 @@ typedef struct {
     bool           bell_visual;
     int            autosave_interval;     /* 세션 자동 저장 주기 (초, 0=비활성) */
     int            session_idle_timeout;  /* 모든 클라이언트 detach 후 세션 유지 시간 (초) */
+    bool           confirm_close_pane;    /* Ctrl+W 등 pane 닫기 전 확인 팝업 */
+    bool           confirm_close_window;  /* window 닫기 전 확인 팝업 (다중 window 합류 시 사용) */
+    bool           confirm_close_session; /* 앱/세션 종료 전 확인 팝업 */
     keybindings_t  keybindings;
 } termemu_config_t;
 
