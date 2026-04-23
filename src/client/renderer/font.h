@@ -46,6 +46,17 @@ font_face_t *font_face_load(const char *path, float size_pt, int dpi);
 void         font_face_destroy(font_face_t *face);
 
 /*
+ * Attach a fallback face. Used when the primary face (or previously added
+ * fallbacks) do not contain a glyph for the requested codepoint.
+ * The fallback uses the same size/dpi as the primary face.
+ * For font collection files (.ttc/.otc), iterates face indices and picks the
+ * first one that contains a Hangul Syllables glyph (U+AC00); on ambiguous
+ * failure falls back to index 0.
+ * @return 0 on success, -1 on failure (path invalid, limit reached, etc.)
+ */
+int font_face_add_fallback(font_face_t *face, const char *path);
+
+/*
  * Rasterize one Unicode codepoint.
  * *bitmap_out receives a malloc'd 8-bit grayscale buffer (width × height bytes).
  * May be NULL if the glyph has no bitmap (e.g. space). Caller frees with

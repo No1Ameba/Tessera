@@ -120,6 +120,55 @@ static void test_shape_empty(void)
     font_face_destroy(f);
 }
 
+/* 한글 fallback: DejaVu 에 없는 U+AC00('가') 이 fallback face 로 rasterize 되는지.
+ * 후보 폰트가 시스템에 설치돼 있지 않으면 SKIP (경고만 출력, 실패 아님). */
+static void test_fallback_cjk(void)
+{
+    static const char *cjk_candidates[] = {
+        "/usr/share/fonts/truetype/nanum/NanumGothicCoding.ttf",
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+        "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        NULL
+    };
+    const char *cjk_path = NULL;
+    for (int i = 0; cjk_candidates[i]; i++) {
+        FILE *fp = fopen(cjk_candidates[i], "rb");
+        if (fp) { fclose(fp); cjk_path = cjk_candidates[i]; break; }
+    }
+    if (!cjk_path) {
+        fprintf(stderr, "  [SKIP] no CJK font installed — fallback test skipped\n");
+        return;
+    }
+
+    font_face_t *f = font_face_load(FONT_PATH, FONT_SIZE, FONT_DPI);
+    if (!f) { g_fail++; return; }
+
+    /* Without fallback: DejaVu has no Hangul, rasterize returns .notdef
+     * (width can be 0 or a tofu box — either way not a true glyph). */
+    uint8_t        *bitmap  = NULL;
+    glyph_metrics_t metrics = {0};
+    int ret = font_rasterize(f, 0xAC00 /* '가' */, &bitmap, &metrics);
+    CHECK(ret == 0, "rasterize U+AC00 succeeds (no fallback → .notdef)");
+    font_bitmap_free(bitmap);
+
+    /* Attach fallback and retry. */
+    int add_ret = font_face_add_fallback(f, cjk_path);
+    CHECK(add_ret == 0, "font_face_add_fallback succeeds");
+
+    bitmap = NULL;
+    memset(&metrics, 0, sizeof metrics);
+    ret = font_rasterize(f, 0xAC00, &bitmap, &metrics);
+    CHECK(ret == 0, "rasterize U+AC00 succeeds with fallback");
+    CHECK(metrics.width > 0 && metrics.height > 0,
+           "U+AC00 produces a real glyph bitmap via fallback");
+    CHECK(metrics.advance_x > 0, "U+AC00 advance > 0 via fallback");
+    font_bitmap_free(bitmap);
+
+    font_face_destroy(f);
+}
+
 static void test_cell_metrics_consistent(void)
 {
     font_face_t *f = font_face_load(FONT_PATH, FONT_SIZE, FONT_DPI);
@@ -153,6 +202,7 @@ int main(void)
     test_rasterize_unicode();
     test_shape_ascii();
     test_shape_empty();
+    test_fallback_cjk();
     test_cell_metrics_consistent();
 
     printf("font: %d/%d tests passed\n", g_pass, g_pass + g_fail);

@@ -4,38 +4,55 @@
 
 ### [BUG] 한글 입력/출력 전반 미지원 (2026-04-22, 갱신 2026-04-23)
 
-**증상 (3가지 영역 모두 재현됨)**:
-1. **터미널 셀 출력**: 셸에서 `echo 한글` 해도 □/공백으로 표시. 커서 폭·셀 경계는 유지되나 글리프가 그려지지 않음.
-2. **터미널 입력**: IME(fcitx/ibus) 로 한글 입력 시 PTY 에 전혀 도달하지 않거나 깨진 바이트만 전달됨.
-3. **Nuklear 오버레이(설정/확인 팝업/우클릭 메뉴)**: 한글 라벨·본문이 모두 □.
+**증상 (3가지 영역 중 ① 해결, ②③ 미해결)**:
+1. ~~**터미널 셀 출력**: 셸에서 `echo 한글` 해도 □/공백으로 표시. 커서 폭·셀 경계는 유지되나 글리프가 그려지지 않음.~~ → **해결 (2026-04-23, 아래 Resolved 항목 참조)**
+2. **터미널 입력**: IME(fcitx/ibus) 로 한글 입력 시 PTY 에 전혀 도달하지 않거나 깨진 바이트만 전달됨. **(미해결)**
+3. **Nuklear 오버레이(설정/확인 팝업/우클릭 메뉴)**: 한글 라벨·본문이 모두 □. **(미해결, `fix/nk-overlay-cjk-font` 에서 시도 중이나 재현)**
 
 **원인 추정 (영역별)**:
-
-1. **터미널 출력 (`gl_renderer`)** — `resolve_font_path("monospace")` 가 리눅스에서 보통 `DejaVuSansMono.ttf` 로 귀결되는데 여기에 Hangul Syllables(U+AC00–U+D7A3) 글리프 자체가 없음. 폰트에 없으므로 `font_face_load` 가 빈 글리프(.notdef) 를 반환 → 빈 셀로 출력. Fallback 체인(한글 폰트로 2차 lookup) 부재.
 
 2. **터미널 입력 (`char_callback` 경로)** — `main.c:1238 char_callback()` 은 GLFW 가 올려주는 Unicode codepoint 를 그대로 UTF-8 인코딩해 PTY 에 넣는 구조. 리눅스(X11/Wayland/WSL) 에서는 IME(fcitx/ibus) 가 GLFW 와 직접 연동되지 않아 조합된 한글 codepoint 가 `char_callback` 까지 도달하지 않는 경우가 많음. GLFW 의 preedit/IME API(`glfwSetPreeditCallback` 등, GLFW 3.4+ 또는 확장) 미사용.
 
 3. **Nuklear 오버레이** — `nk_impl_init()` 에서 `nk_font_atlas_add_from_file()` 의 기본 glyph range(0x20–0xFF) 만 baked 되어 CJK 코드포인트가 아틀라스에 없음. UI 폰트도 `resolve_font_path("monospace")` 첫 매칭이라 한글 미지원 폰트가 집힐 수 있음.
 
-**해결 방향(미착수)**:
+**해결 방향(미착수 — 영역 ②③ 만 남음)**:
 
-- **공통**: 설정에 `ui.font_family` / `terminal.font_family` 추가, 한글 지원 폰트(Noto Sans CJK KR, Nanum Gothic, Malgun Gothic) 폴백 체인 자동 탐색. TTC 파일은 내부 stbtt 가 첫 face 만 읽으므로 후보에서 배제하거나 face index 지정.
-- **터미널 출력**: `font_face` 에 fallback chain 개념 추가 — 주 폰트에 글리프 없으면 한글 폰트로 shape. harfbuzz 가 없으면 codepoint-per-glyph 수준 fallback 만이라도 구현.
+- **공통**: 설정에 `ui.font_family` / `terminal.font_family` / `terminal.fallback_fonts` 추가해 하드코딩 후보 대신 사용자 지정 가능하도록.
 - **터미널 입력**: GLFW 최신(IME preedit 지원) 로 업그레이드 혹은 플랫폼별 IME 브릿지(XIM/IBus D-Bus/WSL WIN32 input) 도입. 최소한 preedit 상태 표시라도 필요.
 - **Nuklear 오버레이**: `nk_font_config.range` 에 한글 glyph range 명시 (`0xAC00–0xD7A3` 등) + atlas 크기 확대. UI 폰트 경로도 별도 resolve.
 
 **영향 파일**:
-- 출력: `src/client/font_face.{c,h}`, `src/client/renderer/gl_renderer.c`, `src/client/main.c` (`resolve_font_path`).
 - 입력: `src/client/main.c` (`char_callback`, `key_callback`), GLFW 버전 / 플랫폼별 IME 브릿지.
 - 오버레이: `src/client/ui/nk_impl.c` (폰트 베이킹), `src/client/main.c` (`nk_impl_init` 호출부).
 
 **참고 브랜치**: `fix/nk-overlay-cjk-font` 에서 Nuklear 오버레이 쪽(영역 3) 만 부분 해결 시도했으나 실제 환경에서 여전히 깨지는 것으로 보고됨(2026-04-23) — 추가 조사 필요. 미머지 상태.
 
-**우선순위**: 상 — 한국어 사용자가 터미널 본연의 기능(한글 입력/출력) 을 쓸 수 없음. Nuklear 오버레이보다 터미널 입출력이 먼저.
+**우선순위**: 상 — 한국어 입력(②) 이 여전히 불가. 영역 ① 출력은 해결되어 붙여넣기/원격 출력은 사용 가능.
 
 ---
 
 ## Resolved
+
+### [FIXED] 터미널 셀 출력 — 한글 `.notdef` 로 빈 셀 표시 (2026-04-23)
+
+**증상**: 셸에서 `echo 한글` 해도 □/공백으로 표시. 커서 폭과 셀 경계는 유지되나 글리프가 그려지지 않음.
+
+**원인**: `font.c` 의 `font_face_t` 가 주 폰트 1개만 들고 있었음. `resolve_font_path("monospace")` 가 리눅스에서 보통 `DejaVuSansMono.ttf` 로 귀결되는데 여기에 Hangul Syllables(U+AC00–U+D7A3) 글리프 자체가 없어 `font_rasterize()` 가 .notdef (빈 글리프) 로 떨어짐. Fallback 체인 부재.
+
+**수정**:
+- `font.h/c` — `font_face_t` 에 fallback face 슬롯 (`FONT_MAX_FALLBACKS=4`) 추가. 신규 API `font_face_add_fallback(face, path)`. `font_rasterize()` 가 primary → fallbacks 순회하며 `FT_Get_Char_Index()` 가 0 이 아닌 첫 face 를 사용하도록 변경. FT_Library 는 primary 와 공유 (hb_font, FT_Face 는 face 별로 소유).
+- TTC/OTC(Font Collection) 대응: `font_face_add_fallback` 내부에서 face 0 이 U+AC00 을 못 가지면 num_faces 만큼 순회해 한글 지원 face index 자동 선택 (Noto Sans CJK TTC 같이 JP face 가 0번인 경우 KR face 로 교체).
+- `main.c` — `resolve_cjk_fallback_path()` 추가 (Nanum*/D2Coding/NotoSansCJK/Malgun/AppleSD 하드코딩 + `fc-match ':lang=ko'` 폴백). 최초 `font_face_load` 직후 및 설정 hot-reload 경로 둘 다에서 `attach_cjk_fallback_if_available()` 호출.
+- `gl_renderer.c` 는 변경 없음 — `font_rasterize(cp)` 단일 API 로 이미 codepoint → glyph bitmap 추상화되어 있었고, fallback 동작은 font 레이어 내부에 닫혀있음. 아틀라스는 codepoint 키로 캐시되므로 어느 face 에서 온 글리프든 동일하게 처리됨.
+- `tests/test_font.c` — 한글(U+AC00) 에 대해 fallback 부착 전/후 rasterize 동작을 검증하는 테스트 추가. 시스템에 한글 폰트가 없으면 SKIP.
+
+**한계**:
+- 설정에서 fallback 폰트를 사용자 지정하는 경로는 아직 없음 (하드코딩 후보만). 후속 이슈로 남김.
+- 영역 ② 입력, 영역 ③ 오버레이는 별도 작업.
+
+**영향 파일**: `src/client/renderer/font.{c,h}`, `src/client/main.c`, `tests/test_font.c`.
+
+---
 
 ### [FIXED] 우클릭 컨텍스트 메뉴 · 설정창 반응형 레이아웃 (2026-04-22)
 

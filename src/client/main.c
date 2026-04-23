@@ -439,6 +439,59 @@ static const char *resolve_font_path(const char *name, char *buf, size_t bufsz)
     return name;
 }
 
+/* 터미널 셀 렌더링용 한글(CJK) fallback 폰트 경로 해석.
+ * 주 폰트(보통 DejaVuSansMono 등) 에 Hangul Syllables 글리프가 없을 때
+ * 2차 조회 대상이 된다. 탐색 순서:
+ *   1) 대표 하드코딩 후보 (NanumGothicCoding, NanumGothic, D2Coding, Malgun, AppleSD)
+ *   2) fc-match 로 ':lang=ko' 매칭된 파일 (TTC 포함)
+ * TTC 는 font_face_add_fallback 가 face index 를 선택하므로 허용.
+ * @return 성공 시 경로(NULL 아님), 찾지 못하면 NULL. */
+static const char *resolve_cjk_fallback_path(char *buf, size_t bufsz)
+{
+    static const char *candidates[] = {
+        "/usr/share/fonts/truetype/nanum/NanumGothicCoding.ttf",
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+        "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
+        "/usr/share/fonts/truetype/d2coding/D2Coding-Ver1.3.2-20180524.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/source-han-sans/SourceHanSansKR-Regular.otf",
+        "C:\\Windows\\Fonts\\malgun.ttf",
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+        NULL
+    };
+    for (int i = 0; candidates[i]; i++) {
+        FILE *f = fopen(candidates[i], "rb");
+        if (f) { fclose(f); return candidates[i]; }
+    }
+#ifndef _WIN32
+    FILE *p = popen("fc-match --format='%{file}\n' ':lang=ko' 2>/dev/null", "r");
+    if (p) {
+        size_t n = fread(buf, 1, bufsz - 1, p);
+        pclose(p);
+        if (n > 0) {
+            buf[n] = '\0';
+            while (n > 0 &&
+                   (buf[n-1] == '\n' || buf[n-1] == '\r' || buf[n-1] == ' '))
+                buf[--n] = '\0';
+            FILE *f = fopen(buf, "rb");
+            if (f) { fclose(f); return buf; }
+        }
+    }
+#endif
+    return NULL;
+}
+
+/* g_font 에 한글 fallback face 가 부착되어 있지 않으면 시도.
+ * 최초 로드 및 폰트 hot-reload 직후 둘 다에서 호출. */
+static void attach_cjk_fallback_if_available(font_face_t *face)
+{
+    if (!face) return;
+    char buf[512] = {0};
+    const char *path = resolve_cjk_fallback_path(buf, sizeof buf);
+    if (path) (void)font_face_add_fallback(face, path);
+}
+
 /* ── Split helpers ───────────────────────────────────────────────────────── */
 
 static void do_split(layout_node_type_t dir)
@@ -1609,6 +1662,7 @@ static void do_config_reload(void)
                                                    sizeof resolved);
         font_face_t *new_font = font_face_load(font_path, new_size, 96);
         if (new_font) {
+            attach_cjk_fallback_if_available(new_font);
             glyph_atlas_t *new_atlas = glyph_atlas_create(1024, 1024);
             if (new_atlas) {
                 gl_renderer_set_font(g_renderer, new_font, new_atlas);
@@ -1799,6 +1853,7 @@ int main(int argc, char *argv[])
 
     g_font = font_face_load(font_path, font_size, 96);
     if (!g_font) { fprintf(stderr, "Failed to load font: %s\n", font_path); return 1; }
+    attach_cjk_fallback_if_available(g_font);
 
     g_atlas    = glyph_atlas_create(1024, 1024);
     g_renderer = gl_renderer_create(g_win_w, g_win_h, g_font, g_atlas);
