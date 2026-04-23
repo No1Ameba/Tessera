@@ -2,26 +2,6 @@
 
 ## Open
 
-### [UX] 우클릭 컨텍스트 메뉴 · 설정창 반응형 레이아웃 (2026-04-22)
-
-**현상**:
-- 우클릭 컨텍스트 메뉴(`main.c` 의 `"ctx_menu"` Nuklear 창) 가 고정 크기 `180x250` 로 생성됨. 폰트 크기·언어 에 따라 버튼 라벨이 잘리거나 메뉴가 화면 밖으로 나갈 수 있음.
-- 설정창(`settings_ui_draw`) 도 `nk_rect(50, 50, 480, 520)` 고정. 작은 화면에서는 잘리고, 큰 화면에서는 상대적으로 작아 읽기 어려움. 내용에 따라 세로 스크롤이 필요할 때도 고정 높이라 일부 필드가 안 보임.
-- 창 리사이즈(`framebuffer_size_callback`) 시에도 두 UI 는 초기 rect 를 유지하기만 함.
-
-**기대 동작**: 확인 팝업(`ui/confirm_dialog.c`) 에 적용한 것처럼
-1. 기준 크기를 화면 비율로 계산 (min/max clamp).
-2. 내용 area 는 `nk_group` + 스크롤로 감싸 오버플로우 시 스크롤.
-3. 컨텍스트 메뉴는 클릭 위치가 화면 밖으로 벗어나지 않도록 `(x, y)` 를 재위치시키는 로직 추가.
-4. 설정창은 탭 내용물 전체를 스크롤 group 으로 감싸 세로 리플로우 보장.
-
-**영향 파일**:
-- `src/client/main.c` (컨텍스트 메뉴 rect 계산)
-- `src/client/ui/settings_ui.c` (`nk_begin` rect / 각 탭의 group 구성)
-- 필요 시 공통 헬퍼를 `ui/` 에 추출 (`ui_overlay_rect(...)` 같은 것)
-
-**우선순위**: 중 — 기능은 동작하지만 UX 품질 이슈. 확인 팝업 작업에서 같은 패턴을 검증한 상태이므로 재사용 가능.
-
 ### [BUG] Nuklear 오버레이(설정/확인 팝업)에서 한글 깨짐 (2026-04-22)
 
 **증상**: `Ctrl+,` 설정창, 닫기 확인 팝업, 우클릭 컨텍스트 메뉴 등 Nuklear 로 그리는 UI 레이어의 한글 문자열이 깨져서 (□ / 공백) 표시됨. 터미널 셀 렌더링(`gl_renderer`) 쪽 한글은 정상.
@@ -40,6 +20,21 @@
 ---
 
 ## Resolved
+
+### [FIXED] 우클릭 컨텍스트 메뉴 · 설정창 반응형 레이아웃 (2026-04-22)
+
+**현상**:
+- 우클릭 컨텍스트 메뉴 고정 `180x250` — 폰트 크기/라벨 변화 시 잘림, 화면 경계 clamp 도 마우스 콜백 하드코딩.
+- 설정창 고정 `480x520` — 작은 화면에서 잘리고, 탭 내용이 많을 때 일부 필드가 가려짐.
+
+**수정**:
+- `ui/ui_overlay.{c,h}` 공통 헬퍼 추가 — `ui_overlay_centered_rect()` (비율 기반 중앙 정렬 + min/max clamp), `ui_overlay_popup_at()` (앵커 기준 팝업 + 화면 경계 flip/clamp).
+- `main.c` — 컨텍스트 메뉴 높이를 버튼 수 × 행 높이 + 스타일 spacing 으로 동적 계산, 위치는 `ui_overlay_popup_at` 으로 일괄 처리. 마우스 콜백의 하드코딩 clamp 제거 (렌더 시점에서 처리하므로 창 리사이즈/폰트 변경에도 자동 재위치).
+- `settings_ui.c` — 초기 rect 를 화면 비율(0.55×0.75, 520~820 / 520~880 clamp) 로 계산. 탭 내용을 `nk_group_begin(NK_WINDOW_BORDER)` 로 감싸 세로 스크롤 허용. 창 content region 에서 탭 헤더/버튼 영역을 뺀 나머지를 group 높이로 잡아, 사용자가 SCALABLE 로 크기 조정해도 리플로우됨. API 에 `win_w, win_h` 파라미터 추가.
+
+**영향 파일**: `src/client/main.c`, `src/client/ui/settings_ui.{c,h}`, `src/client/ui/ui_overlay.{c,h}` (신규), `src/client/CMakeLists.txt`.
+
+---
 
 ### [FIXED] pane split 단축키 동시 입력 시 새 pane 과 기존 pane 이 동기화됨 (2026-04-22)
 

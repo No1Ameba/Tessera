@@ -119,6 +119,11 @@
 - `key_callback` 이 `GLFW_PRESS` / `GLFW_REPEAT` 구분 없이 단축키를 디스패치해 `Alt+-` / `Alt+=` 를 잠깐만 눌러도 OS 키리피트로 `do_split` 이 rapid-fire 발사되어 수많은 초소형 pane 이 생성 → "동기화된 것처럼" 보이던 문제 수정.
 - edge-triggered 액션(`split_*`, `close_pane`, `focus_*`, `copy`, `paste`, `preferences`) 은 `GLFW_PRESS` 에만 디스패치, `GLFW_REPEAT` 는 consume 만 하고 drop. 반복이 자연스러운 `resize_*` / `scroll_*` 은 기존대로 유지.
 
+### Nuklear 오버레이 반응형 레이아웃 (2026-04-22)
+- `src/client/ui/ui_overlay.{c,h}` 공통 헬퍼 추가: `ui_overlay_centered_rect()` (중앙 정렬 + 비율/clamp), `ui_overlay_popup_at()` (앵커 기준 팝업 + 화면 경계 flip/clamp).
+- 우클릭 컨텍스트 메뉴: 고정 `180x250` → 버튼 수 × 행 높이 + 스타일 spacing 기반 동적 계산. 마우스 콜백의 하드코딩 flip 제거, 렌더 시점 clamp 로 일원화.
+- 설정창: 고정 `480x520` → 화면 비율 기반 rect + 탭 내용을 `nk_group` 스크롤로 감싸 리플로우 보장. `settings_ui_draw(..., win_w, win_h)` API 변경.
+
 ---
 
 ## TODO (우선순위 순)

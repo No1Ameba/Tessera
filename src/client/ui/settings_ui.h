@@ -14,12 +14,16 @@ struct nk_context;
 
 /*
  * 설정 패널을 그린다.
- * @return 1 if settings were modified and saved, 0 otherwise.
+ * win_w / win_h: 현재 프레임버퍼 크기 (반응형 rect 계산에 사용).
+ * @return  1  설정이 저장됨 (Save & Apply)
+ *          0  변경 없음
+ *         -1  Close 요청 (창 닫히기 클릭 또는 Close 버튼)
  */
 int settings_ui_draw(struct nk_context *ctx,
                       termemu_config_t *cfg,
                       termemu_theme_t *theme,
                       const char *cfg_path,
-                      const char *theme_path);
+                      const char *theme_path,
+                      float win_w, float win_h);
 
 #endif /* TERMEMU_SETTINGS_UI_H */
