@@ -13,7 +13,7 @@
 
 1. **터미널 출력 (`gl_renderer`)** — `resolve_font_path("monospace")` 가 리눅스에서 보통 `DejaVuSansMono.ttf` 로 귀결되는데 여기에 Hangul Syllables(U+AC00–U+D7A3) 글리프 자체가 없음. 폰트에 없으므로 `font_face_load` 가 빈 글리프(.notdef) 를 반환 → 빈 셀로 출력. Fallback 체인(한글 폰트로 2차 lookup) 부재.
 
-2. **터미널 입력 (`char_callback` 경로)** — `main.c:1238 char_callback()` 은 GLFW 가 올려주는 Unicode codepoint 를 그대로 UTF-8 인코딩해 PTY 에 넣는 구조. 리눅스(X11/Wayland/WSL) 에서는 IME(fcitx/ibus) 가 GLFW 와 직접 연동되지 않아 조합된 한글 codepoint 가 `char_callback` 까지 도달하지 않는 경우가 많음. GLFW 의 preedit/IME API(`glfwSetPreeditCallback` 등, GLFW 3.4+ 또는 확장) 미사용.
+2. **터미널 입력 (`char_callback` 경로)** — 2026-04-23 진단 결과, `main.c:1238 char_callback()` 까지 IME 커밋된 codepoint 는 도달함(GLFW 3.4 X11 백엔드는 XIM 으로 `Xutf8LookupString` 호출). 진짜 원인은 key_callback 이 XIM 필터링된 raw 물리키(커밋 트리거인 Enter/Backspace/Space 등) 를 그대로 PTY 에 먼저 쓰고 `g_key_consumed=1` 로 char_callback 을 차단해 조합 문자가 유실되거나 순서가 뒤집히는 것. Wayland 백엔드는 WSL 에서 비호환이라 이미 `glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11)` 로 강제하고 있음. **영역 ② 부분 해결 브랜치: `fix/terminal-ime-input`** — key_callback 의 특수키 바이트를 pending 버퍼에 스테이징하고 char_callback 에서 비-ASCII (U+0080 이상) 커밋이 오면 드롭, 없으면 `glfwPollEvents` 직후 flush. preedit UI (조합중 표시) 는 GLFW 3.4 바닐라로는 불가능 — XIMPreeditNothing 스타일만 씀 — 후속 이슈.
 
 3. **Nuklear 오버레이** — `nk_impl_init()` 에서 `nk_font_atlas_add_from_file()` 의 기본 glyph range(0x20–0xFF) 만 baked 되어 CJK 코드포인트가 아틀라스에 없음. UI 폰트도 `resolve_font_path("monospace")` 첫 매칭이라 한글 미지원 폰트가 집힐 수 있음.
 
@@ -21,7 +21,7 @@
 
 - **공통**: 설정에 `ui.font_family` / `terminal.font_family` 추가, 한글 지원 폰트(Noto Sans CJK KR, Nanum Gothic, Malgun Gothic) 폴백 체인 자동 탐색. TTC 파일은 내부 stbtt 가 첫 face 만 읽으므로 후보에서 배제하거나 face index 지정.
 - **터미널 출력**: `font_face` 에 fallback chain 개념 추가 — 주 폰트에 글리프 없으면 한글 폰트로 shape. harfbuzz 가 없으면 codepoint-per-glyph 수준 fallback 만이라도 구현.
-- **터미널 입력**: GLFW 최신(IME preedit 지원) 로 업그레이드 혹은 플랫폼별 IME 브릿지(XIM/IBus D-Bus/WSL WIN32 input) 도입. 최소한 preedit 상태 표시라도 필요.
+- **터미널 입력**: (부분 적용됨 — `fix/terminal-ime-input`) key_callback 이 X11/XIM 에서 필터링된 특수키를 바로 PTY 로 흘리지 않도록 스테이징 버퍼 도입. 남은 과제: preedit 상태 표시(현재는 fcitx/ibus 자체 팝업에 의존), Wayland text-input-v3 지원(GLFW 3.4 바닐라 미지원 → 업그레이드 또는 브릿지 필요), WSL 에서 IME 서버가 실제로 X11 소켓에 도달 가능한지 환경 확인.
 - **Nuklear 오버레이**: `nk_font_config.range` 에 한글 glyph range 명시 (`0xAC00–0xD7A3` 등) + atlas 크기 확대. UI 폰트 경로도 별도 resolve.
 
 **영향 파일**:

@@ -229,6 +229,29 @@ static termemu_theme_t  *g_theme_mut_ptr = NULL;
 /* key_callback에서 처리 완료 시 char_callback 무시 */
 static int g_key_consumed = 0;
 
+/* IME 커밋 상호작용용 특수키 바이트 지연 버퍼.
+ *
+ * X11 + XIM (fcitx/ibus) 환경에서는 Korean/CJK 조합 커밋 시
+ *   1) key_callback 이 raw 물리키 (Enter/Backspace 등) 로 먼저 호출되고
+ *   2) 직후 char_callback 이 조합된 codepoint (예: U+D558 '하') 로 호출된다.
+ *
+ * 특수키 바이트를 PTY 로 즉시 보내면 '하' 보다 '\r' 이 먼저 도달해
+ * 조합 문자가 유실되거나 순서가 뒤집히므로, key_callback 의 특수키
+ * 바이트는 일단 여기에 스테이징하고 char_callback 에서 IME 커밋
+ * (비-ASCII codepoint) 이 발생하면 드롭한다. 커밋이 없으면 glfwPollEvents
+ * 직후 flush_pending_key_bytes() 가 PTY 로 내보낸다. */
+static uint8_t g_pending_key_bytes[16] = {0};
+static int     g_pending_key_len       = 0;
+
+static void flush_pending_key_bytes(void)
+{
+    if (g_pending_key_len > 0) {
+        ipc_client_pty_input(g_client, g_active_pane,
+                             g_pending_key_bytes, (size_t)g_pending_key_len);
+        g_pending_key_len = 0;
+    }
+}
+
 /* ── Callbacks ───────────────────────────────────────────────────────────── */
 
 /* OSC 52 클립보드 콜백 — screen에서 호출됨 */
@@ -1226,11 +1249,21 @@ static void key_callback(GLFWwindow *win, int key, int scancode,
         }
     }
 
-    /* ── PTY 입력 (특수키) ── */
+    /* ── PTY 입력 (특수키) ──
+     * XIM 이 IME 커밋용으로 가로챈 키(Enter/Backspace 등)도 GLFW 는
+     * 여기로 올려준다(x11_window.c processEvent 의 filtered 체크가 _glfwInputKey
+     * 에는 적용되지 않음). 즉시 PTY 로 쓰면 직후 char_callback 이 실어올 조합
+     * 문자와 순서가 어긋나므로 pending 버퍼에 스테이징만 해 두고, char_callback
+     * 에서 비-ASCII 커밋을 보면 드롭, 아니면 glfwPollEvents 후 flush 한다. */
     uint8_t seq[16];
     int slen = input_key_to_bytes(key, mod_flags, seq, sizeof seq);
     if (slen > 0) {
-        ipc_client_pty_input(g_client, g_active_pane, seq, (size_t)slen);
+        if (slen > (int)sizeof g_pending_key_bytes) slen = (int)sizeof g_pending_key_bytes;
+        /* 이전 pending 이 남아있으면 선행키 먼저 flush (같은 polling 사이클
+         * 안에서 두 개의 특수키가 연속 입력되는 드문 경우). */
+        if (g_pending_key_len > 0) flush_pending_key_bytes();
+        memcpy(g_pending_key_bytes, seq, (size_t)slen);
+        g_pending_key_len = slen;
         g_key_consumed = 1;
     }
 }
@@ -1245,7 +1278,21 @@ static void char_callback(GLFWwindow *win, unsigned int codepoint)
         return;
     }
 
-    /* key_callback에서 이미 처리된 경우 무시 */
+    /* 비-ASCII codepoint 는 IME 커밋(한글 등) 으로 간주 — key_callback 이
+     * pending 으로 스테이징해 둔 특수키 바이트는 XIM 이 커밋 트리거로 소비한
+     * 것이므로 PTY 로 보내지 않고 드롭한다. 조합 문자만 PTY 로 전달. */
+    if (codepoint >= 0x80) {
+        g_pending_key_len = 0;  /* drop staged Enter/Backspace/etc */
+        char utf8[4];
+        int len = utf8_encode(codepoint, utf8);
+        if (len > 0)
+            ipc_client_pty_input(g_client, g_active_pane,
+                                 (const uint8_t *)utf8, (size_t)len);
+        return;
+    }
+
+    /* ASCII 경로: key_callback 에서 처리된 경우 무시 (Ctrl-C 등 제어문자
+     * 이중 전송 방지). */
     if (g_key_consumed) return;
 
     /* UTF-8로 인코딩해서 PTY에 전송 */
@@ -1951,6 +1998,11 @@ int main(int argc, char *argv[])
     /* ── Event loop ──────────────────────────────────────────────────────── */
     while (!glfwWindowShouldClose(g_window) && g_running) {
         glfwPollEvents();
+
+        /* key_callback 이 스테이징한 특수키 바이트 flush — IME 커밋이 따라붙지
+         * 않은 경우에만 PTY 로 실제 전송된다. (poll 한 번으로 여러 X event 가
+         * 처리되는 동안 char_callback 이 비-ASCII 를 커밋했다면 이미 드롭됨.) */
+        flush_pending_key_bytes();
 
         /* SIGHUP 또는 inotify → config + theme 재로드 */
         if (g_sighup || (fs_watcher && fs_watch_poll(fs_watcher) > 0)) {
