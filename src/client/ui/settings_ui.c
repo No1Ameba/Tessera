@@ -495,7 +495,7 @@ int settings_ui_draw(struct nk_context *ctx,
     const float tabs_spacer_h  = 4.0f;
     const float footer_spacer  = 8.0f;
     const float footer_btn_h   = 35.0f;
-    const float trailing_spacer = 8.0f;
+    const float trailing_spacer = 18.0f;  /* SCALABLE grip + 하단 border 여유 */
 
     struct nk_rect content = nk_window_get_content_region(ctx);
     float sp = ctx->style.window.spacing.y;
@@ -504,7 +504,7 @@ int settings_ui_draw(struct nk_context *ctx,
     float fixed_h = tabs_row_h + tabs_spacer_h
                   + footer_spacer + footer_btn_h + trailing_spacer
                   + 5.0f * sp
-                  + 10.0f;  /* 스타일 추정치 오차 흡수용 safety margin */
+                  + 20.0f;  /* 스타일 추정치 오차 흡수용 safety margin */
 
     float group_h = content.h - fixed_h;
     if (group_h < 60.0f) group_h = 60.0f;
