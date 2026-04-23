@@ -2,20 +2,36 @@
 
 ## Open
 
-### [BUG] Nuklear 오버레이(설정/확인 팝업)에서 한글 깨짐 (2026-04-22)
+### [BUG] 한글 입력/출력 전반 미지원 (2026-04-22, 갱신 2026-04-23)
 
-**증상**: `Ctrl+,` 설정창, 닫기 확인 팝업, 우클릭 컨텍스트 메뉴 등 Nuklear 로 그리는 UI 레이어의 한글 문자열이 깨져서 (□ / 공백) 표시됨. 터미널 셀 렌더링(`gl_renderer`) 쪽 한글은 정상.
+**증상 (3가지 영역 모두 재현됨)**:
+1. **터미널 셀 출력**: 셸에서 `echo 한글` 해도 □/공백으로 표시. 커서 폭·셀 경계는 유지되나 글리프가 그려지지 않음.
+2. **터미널 입력**: IME(fcitx/ibus) 로 한글 입력 시 PTY 에 전혀 도달하지 않거나 깨진 바이트만 전달됨.
+3. **Nuklear 오버레이(설정/확인 팝업/우클릭 메뉴)**: 한글 라벨·본문이 모두 □.
 
-**원인 추정**: `nk_impl_init()` 에서 `nk_font_atlas_add_from_file()` 로 TTF 를 올릴 때 기본 ASCII glyph range(`nk_font_default_glyph_ranges()`, 0x20–0xFF) 만 baked 됨. CJK/한글 코드포인트는 아틀라스에 없어 렌더 시 .notdef 로 폴백. 또한 현재 UI 폰트는 `resolve_font_path("monospace")` 로 받은 첫 매칭 — 한글 지원이 없는 라틴 전용 폰트일 가능성이 큼.
+**원인 추정 (영역별)**:
+
+1. **터미널 출력 (`gl_renderer`)** — `resolve_font_path("monospace")` 가 리눅스에서 보통 `DejaVuSansMono.ttf` 로 귀결되는데 여기에 Hangul Syllables(U+AC00–U+D7A3) 글리프 자체가 없음. 폰트에 없으므로 `font_face_load` 가 빈 글리프(.notdef) 를 반환 → 빈 셀로 출력. Fallback 체인(한글 폰트로 2차 lookup) 부재.
+
+2. **터미널 입력 (`char_callback` 경로)** — `main.c:1238 char_callback()` 은 GLFW 가 올려주는 Unicode codepoint 를 그대로 UTF-8 인코딩해 PTY 에 넣는 구조. 리눅스(X11/Wayland/WSL) 에서는 IME(fcitx/ibus) 가 GLFW 와 직접 연동되지 않아 조합된 한글 codepoint 가 `char_callback` 까지 도달하지 않는 경우가 많음. GLFW 의 preedit/IME API(`glfwSetPreeditCallback` 등, GLFW 3.4+ 또는 확장) 미사용.
+
+3. **Nuklear 오버레이** — `nk_impl_init()` 에서 `nk_font_atlas_add_from_file()` 의 기본 glyph range(0x20–0xFF) 만 baked 되어 CJK 코드포인트가 아틀라스에 없음. UI 폰트도 `resolve_font_path("monospace")` 첫 매칭이라 한글 미지원 폰트가 집힐 수 있음.
 
 **해결 방향(미착수)**:
-- `nk_font_config` 에 한글 glyph range 추가 — `{0x0020, 0x00FF, 0xAC00, 0xD7A3, 0x3000, 0x303F, 0x3130, 0x318F, 0}` 정도. 아틀라스 크기도 늘려야 함 (현재 atlas 는 Nuklear 기본값).
-- UI 폰트 폴백 체인: 한글 지원 폰트(Noto Sans CJK KR, Nanum Gothic 등) 가 있으면 그걸로 베이킹, 없으면 경고 + 라틴만.
-- 설정에 `ui.font_family` 추가해 사용자가 한글 폰트 지정 가능하게.
 
-**영향 파일**: `src/client/ui/nk_impl.c` (init · 폰트 베이킹), `src/client/main.c` (`nk_impl_init` 호출부 폰트 경로).
+- **공통**: 설정에 `ui.font_family` / `terminal.font_family` 추가, 한글 지원 폰트(Noto Sans CJK KR, Nanum Gothic, Malgun Gothic) 폴백 체인 자동 탐색. TTC 파일은 내부 stbtt 가 첫 face 만 읽으므로 후보에서 배제하거나 face index 지정.
+- **터미널 출력**: `font_face` 에 fallback chain 개념 추가 — 주 폰트에 글리프 없으면 한글 폰트로 shape. harfbuzz 가 없으면 codepoint-per-glyph 수준 fallback 만이라도 구현.
+- **터미널 입력**: GLFW 최신(IME preedit 지원) 로 업그레이드 혹은 플랫폼별 IME 브릿지(XIM/IBus D-Bus/WSL WIN32 input) 도입. 최소한 preedit 상태 표시라도 필요.
+- **Nuklear 오버레이**: `nk_font_config.range` 에 한글 glyph range 명시 (`0xAC00–0xD7A3` 등) + atlas 크기 확대. UI 폰트 경로도 별도 resolve.
 
-**우선순위**: 중 — 기능 자체는 동작하지만 UX 품질에 큰 영향. 한국어 시스템에서 설정창/확인 팝업/메뉴 문구가 본문 텍스트에서도 영향 받음.
+**영향 파일**:
+- 출력: `src/client/font_face.{c,h}`, `src/client/renderer/gl_renderer.c`, `src/client/main.c` (`resolve_font_path`).
+- 입력: `src/client/main.c` (`char_callback`, `key_callback`), GLFW 버전 / 플랫폼별 IME 브릿지.
+- 오버레이: `src/client/ui/nk_impl.c` (폰트 베이킹), `src/client/main.c` (`nk_impl_init` 호출부).
+
+**참고 브랜치**: `fix/nk-overlay-cjk-font` 에서 Nuklear 오버레이 쪽(영역 3) 만 부분 해결 시도했으나 실제 환경에서 여전히 깨지는 것으로 보고됨(2026-04-23) — 추가 조사 필요. 미머지 상태.
+
+**우선순위**: 상 — 한국어 사용자가 터미널 본연의 기능(한글 입력/출력) 을 쓸 수 없음. Nuklear 오버레이보다 터미널 입출력이 먼저.
 
 ---
 
