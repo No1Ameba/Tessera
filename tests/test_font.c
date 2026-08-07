@@ -2,6 +2,7 @@
  * test_font.c — Unit tests for FreeType + HarfBuzz font rasterization.
  * Requires DejaVu Sans Mono (standard Debian/Ubuntu package fonts-dejavu-core).
  */
+#define _POSIX_C_SOURCE 200809L  /* popen/pclose for the fallback test */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -143,6 +144,68 @@ static void test_cell_metrics_consistent(void)
     font_face_destroy(f);
 }
 
+/* Resolve a font path via fontconfig, mirroring the client's resolve_font_path.
+ * Returns 1 with an absolute path in out, 0 if nothing usable was found. */
+static int fc_resolve(const char *pattern, char *out, size_t outsz)
+{
+    char cmd[256];
+    snprintf(cmd, sizeof cmd,
+             "fc-match --format='%%{file}' '%s' 2>/dev/null", pattern);
+    FILE *p = popen(cmd, "r");
+    if (!p) return 0;
+    size_t n = fread(out, 1, outsz - 1, p);
+    pclose(p);
+    if (n == 0) return 0;
+    out[n] = '\0';
+    if (out[n - 1] == '\n') out[--n] = '\0';
+    return out[0] == '/';
+}
+
+static void test_fallback_chain(void)
+{
+    font_face_t *f = font_face_load(FONT_PATH, FONT_SIZE, FONT_DPI);
+    if (!f) { g_fail++; return; }
+
+    /* API contract. */
+    CHECK(font_face_add_fallback(NULL, FONT_PATH) == -1, "add_fallback(NULL face) rejected");
+    CHECK(font_face_add_fallback(f, NULL) == -1,          "add_fallback(NULL path) rejected");
+    CHECK(font_face_add_fallback(f, "/nonexistent/x.ttf") == -1, "add_fallback(bad path) rejected");
+
+    /* DejaVu Sans Mono lacks Hangul; U+AC00 must still rasterize (as the
+     * primary's .notdef box) rather than error — no silently-failed glyph. */
+    uint8_t *bmp = NULL; glyph_metrics_t m = {0};
+    int ret = font_rasterize(f, 0xAC00, &bmp, &m);
+    CHECK(ret == 0, "rasterize U+AC00 succeeds without coverage (.notdef)");
+    font_bitmap_free(bmp);
+
+    /* Attach a Korean-capable fallback (when the host has one) and verify the
+     * Hangul syllable '가' now rasterizes to a real, non-empty glyph. */
+    char ko_path[512];
+    if (fc_resolve(":lang=ko", ko_path, sizeof ko_path) &&
+        strcmp(ko_path, FONT_PATH) != 0) {
+        CHECK(font_face_add_fallback(f, ko_path) == 0, "add Korean fallback succeeds");
+
+        bmp = NULL; memset(&m, 0, sizeof m);
+        ret = font_rasterize(f, 0xAC00, &bmp, &m);
+        CHECK(ret == 0,       "rasterize '가' via fallback succeeds");
+        CHECK(bmp != NULL,    "'가' has a non-empty bitmap via fallback");
+        CHECK(m.width > 0,    "'가' bitmap width > 0 via fallback");
+        CHECK(m.height > 0,   "'가' bitmap height > 0 via fallback");
+        fprintf(stderr, "  fallback: '가' %ux%u from %s\n", m.width, m.height, ko_path);
+        font_bitmap_free(bmp);
+
+        /* Primary coverage must still win: 'A' comes from the primary face. */
+        bmp = NULL; memset(&m, 0, sizeof m);
+        ret = font_rasterize(f, 'A', &bmp, &m);
+        CHECK(ret == 0 && m.width > 0, "primary glyph 'A' still rasterizes with fallback attached");
+        font_bitmap_free(bmp);
+    } else {
+        fprintf(stderr, "  SKIP: no Korean fallback font on host (fc-match :lang=ko)\n");
+    }
+
+    font_face_destroy(f);
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────────── */
 
 int main(void)
@@ -154,6 +217,7 @@ int main(void)
     test_shape_ascii();
     test_shape_empty();
     test_cell_metrics_consistent();
+    test_fallback_chain();
 
     printf("font: %d/%d tests passed\n", g_pass, g_pass + g_fail);
     return g_fail ? 1 : 0;

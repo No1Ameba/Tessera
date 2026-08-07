@@ -439,6 +439,34 @@ static const char *resolve_font_path(const char *name, char *buf, size_t bufsz)
     return name;
 }
 
+/*
+ * Attach CJK (한중일) fallback fonts so codepoints the primary monospace font
+ * lacks — most importantly Hangul (U+AC00–U+D7A3) — still render instead of
+ * showing a blank cell. Uses fontconfig (:lang=…) to locate a covering face
+ * per script, skipping the primary itself and duplicates (ko/ja/zh commonly
+ * resolve to a single pan-CJK file such as Noto Sans CJK).
+ */
+static void add_cjk_fallbacks(font_face_t *font, const char *primary_path)
+{
+    static const char *patterns[] = { ":lang=ko", ":lang=ja", ":lang=zh-cn", NULL };
+    char added[FONT_MAX_FALLBACK][512];
+    int  n_added = 0;
+    for (int i = 0; patterns[i] && n_added < FONT_MAX_FALLBACK; i++) {
+        char buf[512] = {0};
+        const char *p = resolve_font_path(patterns[i], buf, sizeof buf);
+        /* resolve_font_path echoes the pattern back (":lang=…") when fc-match
+         * finds nothing → not an absolute path; skip those. */
+        if (!p || p[0] != '/') continue;
+        if (primary_path && strcmp(p, primary_path) == 0) continue;
+        int dup = 0;
+        for (int k = 0; k < n_added; k++)
+            if (strcmp(added[k], p) == 0) { dup = 1; break; }
+        if (dup) continue;
+        if (font_face_add_fallback(font, p) == 0)
+            strncpy(added[n_added++], p, sizeof added[0] - 1);
+    }
+}
+
 /* ── Split helpers ───────────────────────────────────────────────────────── */
 
 static void do_split(layout_node_type_t dir)
@@ -1609,6 +1637,7 @@ static void do_config_reload(void)
                                                    sizeof resolved);
         font_face_t *new_font = font_face_load(font_path, new_size, 96);
         if (new_font) {
+            add_cjk_fallbacks(new_font, font_path);
             glyph_atlas_t *new_atlas = glyph_atlas_create(1024, 1024);
             if (new_atlas) {
                 gl_renderer_set_font(g_renderer, new_font, new_atlas);
@@ -1799,6 +1828,7 @@ int main(int argc, char *argv[])
 
     g_font = font_face_load(font_path, font_size, 96);
     if (!g_font) { fprintf(stderr, "Failed to load font: %s\n", font_path); return 1; }
+    add_cjk_fallbacks(g_font, font_path);
 
     g_atlas    = glyph_atlas_create(1024, 1024);
     g_renderer = gl_renderer_create(g_win_w, g_win_h, g_font, g_atlas);

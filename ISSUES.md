@@ -20,12 +20,12 @@
 **해결 방향(미착수)**:
 
 - **공통**: 설정에 `ui.font_family` / `terminal.font_family` 추가, 한글 지원 폰트(Noto Sans CJK KR, Nanum Gothic, Malgun Gothic) 폴백 체인 자동 탐색. TTC 파일은 내부 stbtt 가 첫 face 만 읽으므로 후보에서 배제하거나 face index 지정.
-- **터미널 출력**: `font_face` 에 fallback chain 개념 추가 — 주 폰트에 글리프 없으면 한글 폰트로 shape. harfbuzz 가 없으면 codepoint-per-glyph 수준 fallback 만이라도 구현.
+- **터미널 출력**: ✅ **해결됨 (branch `feat/cjk-font-fallback`, 2026-08-07)** — `renderer/font.{c,h}` 에 fallback chain 도입. `font_face_t` 가 주 face + 폴백 face 배열(`FONT_MAX_FALLBACK`)을 들고, `font_rasterize` 가 주 face 에 글리프 없으면(`FT_Get_Char_Index==0`) 폴백 face 순회, 모두 없으면 주 face 의 `.notdef` 박스로 표시(빈 셀 방지). `main.c add_cjk_fallbacks()` 가 fontconfig `:lang=ko/ja/zh` 로 Noto CJK 등 자동 발견해 startup·핫리로드 양쪽에서 부착. 렌더러/아틀라스는 cp 키잉이라 무변경. 검증: DejaVu(한글無) 주폰트에서 '가'(U+AC00)가 Noto CJK 폴백으로 15x16 실제 글리프 래스터화(test_font 34/34, ASan 클린). 남은 확인: 실 앱에서 시각 확인.
 - **터미널 입력**: GLFW 최신(IME preedit 지원) 로 업그레이드 혹은 플랫폼별 IME 브릿지(XIM/IBus D-Bus/WSL WIN32 input) 도입. 최소한 preedit 상태 표시라도 필요.
 - **Nuklear 오버레이**: `nk_font_config.range` 에 한글 glyph range 명시 (`0xAC00–0xD7A3` 등) + atlas 크기 확대. UI 폰트 경로도 별도 resolve.
 
 **영향 파일**:
-- 출력: `src/client/font_face.{c,h}`, `src/client/renderer/gl_renderer.c`, `src/client/main.c` (`resolve_font_path`).
+- 출력: `src/client/renderer/font.{c,h}` (fallback chain 구현됨; 과거 문서의 `font_face.{c,h}` 는 실존하지 않음), `src/client/renderer/gl_renderer.c`, `src/client/main.c` (`resolve_font_path`, `add_cjk_fallbacks`).
 - 입력: `src/client/main.c` (`char_callback`, `key_callback`), GLFW 버전 / 플랫폼별 IME 브릿지.
 - 오버레이: `src/client/ui/nk_impl.c` (폰트 베이킹), `src/client/main.c` (`nk_impl_init` 호출부).
 
