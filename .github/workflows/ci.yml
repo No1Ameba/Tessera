@@ -61,3 +61,28 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  # Windows — MSVC compile-check of the platform leaf backends.
+  #
+  # A full Windows build is not yet possible: the daemon (ipc_server.c) is bound
+  # to epoll and needs an IOCP port first. This job therefore only compiles the
+  # three Windows platform sources (ConPTY / Named Pipe / ReadDirectoryChangesW)
+  # with cl /c to verify they build against the Windows SDK and that
+  # termemu_pty.h is Windows-valid. Their #includes are all source-relative, so
+  # no cJSON / FreeType / vcpkg are needed here.
+  # ---------------------------------------------------------------------------
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSVC (cl on PATH)
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Compile-check Windows platform backends
+        shell: cmd
+        run: |
+          cl /c /W3 /nologo src\platform\windows\pty_win.c /Fo:pty_win.obj || exit /b 1
+          cl /c /W3 /nologo src\platform\windows\ipc_win.c /Fo:ipc_win.obj || exit /b 1
+          cl /c /W3 /nologo src\platform\windows\fs_watch_win.c /Fo:fswatch_win.obj || exit /b 1

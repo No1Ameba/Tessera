@@ -137,7 +137,7 @@
 7. [x] **OSC 8 하이퍼링크:** 클릭 가능한 URL ✅
 8. [ ] **Kitty Image Protocol:** 이미지 인라인 표시
 9. [x] **크래시 복구:** 데몬 상태 저장/복원 ✅
-10. [~] **CI 파이프라인:** GitHub Actions — Linux/macOS 빌드는 `.github/workflows/ci.yml` 로 구현됨. 남은 것: Windows 잡(백엔드 스텁 구현 후), ASan/UBSan 잡(`-DTERMEMU_SANITIZE=ON`) 추가.
+10. [~] **CI 파이프라인:** GitHub Actions `.github/workflows/ci.yml` — Linux/macOS 전체 빌드+테스트 + **Windows 잡(`build-windows`, 2026-08-07 추가)**: MSVC `cl /c` 로 platform leaf 3종(ConPTY/NamedPipe/ReadDirectoryChangesW) 컴파일 체크(데몬 IOCP 포팅 전까지 전체 빌드는 불가하므로 leaf 컴파일만 검증). 남은 것: ASan/UBSan 잡(`-DTERMEMU_SANITIZE=ON`), 데몬 포팅 후 Windows 전체 빌드.
 11. [ ] **Kitty Keyboard Protocol:** 정밀 키 입력 (vim 미지원, 최하 우선순위)
 
 ---
