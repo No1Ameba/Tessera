@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -16,8 +17,20 @@
 /* ─── 소켓 경로 ──────────────────────────────────────────────────────────── */
 
 int ipc_socket_path(char *buf, size_t buflen) {
-    uid_t uid = getuid();
-    int n = snprintf(buf, buflen, IPC_SOCKET_PATH_FMT, (unsigned)uid);
+    /* $XDG_RUNTIME_DIR (per-user, mode 0700, tmpfs) 는 런타임 소켓의 올바른
+     * 위치다. world-writable 인 /tmp 는 소켓 파일에 대한 symlink/TOCTOU 경쟁에
+     * 노출되므로 XDG_RUNTIME_DIR 를 우선한다. 변수가 없을 때만 /tmp 로 폴백한다
+     * (데몬과 클라이언트는 같은 env 를 상속하므로 경로가 일치한다). */
+    const char *runtime = getenv("XDG_RUNTIME_DIR");
+    int n;
+    if (runtime && runtime[0] == '/') {
+        size_t rl = strlen(runtime);
+        while (rl > 1 && runtime[rl - 1] == '/') rl--;  /* 후행 '/' 제거 */
+        n = snprintf(buf, buflen, "%.*s/termemu-%u.sock",
+                     (int)rl, runtime, (unsigned)getuid());
+    } else {
+        n = snprintf(buf, buflen, IPC_SOCKET_PATH_FMT, (unsigned)getuid());
+    }
     if (n < 0 || (size_t)n >= buflen) return -1;
     return 0;
 }
