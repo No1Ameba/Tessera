@@ -21,7 +21,9 @@
 
 - **공통**: 설정에 `ui.font_family` / `terminal.font_family` 추가, 한글 지원 폰트(Noto Sans CJK KR, Nanum Gothic, Malgun Gothic) 폴백 체인 자동 탐색. TTC 파일은 내부 stbtt 가 첫 face 만 읽으므로 후보에서 배제하거나 face index 지정.
 - **터미널 출력**: `font_face` 에 fallback chain 개념 추가 — 주 폰트에 글리프 없으면 한글 폰트로 shape. harfbuzz 가 없으면 codepoint-per-glyph 수준 fallback 만이라도 구현.
-- **터미널 입력**: 🔶 **부분 해결 — 재설계 (branch `feat/ime-input-redesign`, 2026-08-07, 실환경 검증 대기)**. char_callback 을 유일한 텍스트 경로로 두고, key_callback 은 커밋 트리거 키(Enter/Tab/Backspace)만 `g_staged_key` 에 스테이징 후 glfwPollEvents 직후 flush, 그 외 특수키(화살표/기능키/Ctrl·Alt 조합)는 즉시 전송. char_callback 에 비-ASCII(≥U+0080) 커밋이 오면 스테이징 트리거를 드롭 → 조합 문자만 PTY 전송. 기존 스테이징 해킹(`fix/terminal-ime-input`, 모든 특수키 지연 + 오드롭 위험) 대비 내비게이션 지연 제거·오드롭 방지·구조 정리. **남은 한계(vanilla GLFW 3.4 가 preedit 상태 미노출 → 근본 해결 불가)**: 조합 중 Backspace/Escape 로 편집·취소 시 셸에 바이트가 샐 수 있고, 조합중(preedit) 시각 표시 없음(fcitx/ibus 자체 팝업 의존). **완전 해결 경로**: IME preedit 지원 GLFW 빌드(관련 PR/포크)로 교체하거나 XIM/IBus D-Bus 브릿지 직접 구현 — 이 경우 preedit 표시까지 얻음. 별도 인프라 결정 필요.
+- **터미널 입력**: 🔶 **재설계 + 로케일 수정 (branch `feat/ime-input-redesign`, 2026-08-07, 실환경 검증 중)**.
+    - **선행 근본 원인(2026-08-07 발견)**: `main.c` 에 `setlocale(LC_ALL, "")` 호출이 없어 프로세스가 기본 "C" 로케일 → GLFW 의 XIM(`XOpenIM`) 초기화가 조용히 실패 → IME 가 아예 안 물려 한/영 전환해도 ASCII 만 입력됨. 환경(fcitx5 실행, `XMODIFIERS=@im=fcitx`, `LANG=ko_KR.UTF-8`)은 정상이었음. **수정**: `glfwInit()` 이전에 `setlocale(LC_ALL, "")` 추가. 이게 있어야 아래 key/char 재설계가 의미를 가짐.
+    - **재설계**: char_callback 을 유일한 텍스트 경로로 두고, key_callback 은 커밋 트리거 키(Enter/Tab/Backspace)만 `g_staged_key` 에 스테이징 후 glfwPollEvents 직후 flush, 그 외 특수키(화살표/기능키/Ctrl·Alt 조합)는 즉시 전송. char_callback 에 비-ASCII(≥U+0080) 커밋이 오면 스테이징 트리거를 드롭 → 조합 문자만 PTY 전송. 기존 스테이징 해킹(`fix/terminal-ime-input`, 모든 특수키 지연 + 오드롭 위험) 대비 내비게이션 지연 제거·오드롭 방지·구조 정리. **남은 한계(vanilla GLFW 3.4 가 preedit 상태 미노출 → 근본 해결 불가)**: 조합 중 Backspace/Escape 로 편집·취소 시 셸에 바이트가 샐 수 있고, 조합중(preedit) 시각 표시 없음(fcitx/ibus 자체 팝업 의존). **완전 해결 경로**: IME preedit 지원 GLFW 빌드(관련 PR/포크)로 교체하거나 XIM/IBus D-Bus 브릿지 직접 구현 — 이 경우 preedit 표시까지 얻음. 별도 인프라 결정 필요.
 - **Nuklear 오버레이**: `nk_font_config.range` 에 한글 glyph range 명시 (`0xAC00–0xD7A3` 등) + atlas 크기 확대. UI 폰트 경로도 별도 resolve.
 
 **영향 파일**:

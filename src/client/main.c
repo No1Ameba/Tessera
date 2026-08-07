@@ -17,6 +17,7 @@
 #include <string.h>
 #include <signal.h>
 #include <time.h>
+#include <locale.h>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -1718,6 +1719,12 @@ static void do_config_reload(void)
 
 int main(int argc, char *argv[])
 {
+    /* 프로세스 로케일을 환경(LANG/LC_*)에 맞춘다. X11 XIM(fcitx/ibus)은 이
+     * 호출이 있어야 UTF-8 로케일을 인지해 GLFW 가 input context 를 만들 수 있다.
+     * 이게 없으면 기본 "C" 로케일이라 IME 가 아예 물리지 않아 한/영 전환해도
+     * ASCII 만 입력된다. glfwInit() 보다 먼저 호출해야 한다. */
+    setlocale(LC_ALL, "");
+
     /* CLI 인자 파싱 */
     const char *remote_target = NULL;
     const char *attach_name   = NULL;
