@@ -90,6 +90,32 @@ int input_glfw_key_from_name(const char *name)
     return -1;
 }
 
+int keybind_matches(const char *binding, unsigned int mods, int glfw_key)
+{
+    if (!binding || !binding[0]) return 0;
+
+    char buf[64];
+    strncpy(buf, binding, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    unsigned int req_mods = 0;
+    char *p = buf;
+    char *plus;
+
+    while ((plus = strchr(p, '+')) != NULL) {
+        *plus = '\0';
+        if      (strcmp(p, "Alt")   == 0) req_mods |= INPUT_MOD_ALT;
+        else if (strcmp(p, "Ctrl")  == 0) req_mods |= INPUT_MOD_CTRL;
+        else if (strcmp(p, "Shift") == 0) req_mods |= INPUT_MOD_SHIFT;
+        p = plus + 1;
+    }
+
+    int req_key = input_glfw_key_from_name(p);
+    if (req_key < 0) return 0;
+
+    return (mods == req_mods) && (glfw_key == req_key);
+}
+
 /* ── Helpers ────────────────────────────────────────────────────────────── */
 
 static int write_tilde(uint8_t *buf, int size, int n)

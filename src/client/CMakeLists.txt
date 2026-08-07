@@ -5,6 +5,7 @@ if(TERMEMU_BUILD_APPS)
         font_resolve.c
         pane_store.c
         text_select.c
+        client_util.c
         screen.c
         ipc_client.c
         renderer/gl_renderer.c

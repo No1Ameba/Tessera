@@ -35,6 +35,7 @@
 #include "font_resolve.h"
 #include "pane_store.h"
 #include "text_select.h"
+#include "client_util.h"
 #include "ipc_client.h"
 #include "ui/layout.h"
 #include "ui/input.h"
@@ -112,12 +113,7 @@ static uint32_t g_last_click_pane = 0;
 static int      g_last_click_col = -1, g_last_click_row = -1;
 static int      g_click_count = 0;
 
-static long now_ms_mono(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
-}
+/* now_ms_mono / open_url → client_util.{c,h} */
 
 /* 워드 문자 판정 — ASCII 알파넘+_ 이상, non-ASCII 는 단어로 간주 (CJK 등). */
 /* 선택 지오메트리/텍스트 순수 헬퍼 → text_select.{c,h} */
@@ -655,26 +651,6 @@ static void do_resize_pane(int dir)
 }
 
 /* URL 을 OS 기본 핸들러로 연다 (Linux: xdg-open, macOS: open). 비차단. */
-static void open_url(const char *url)
-{
-    if (!url || !*url) return;
-    pid_t pid = fork();
-    if (pid == 0) {
-        setsid();
-        int devnull = open("/dev/null", O_RDWR);
-        if (devnull >= 0) {
-            dup2(devnull, 0); dup2(devnull, 1); dup2(devnull, 2);
-            close(devnull);
-        }
-#ifdef __APPLE__
-        execlp("open", "open", url, (char*)NULL);
-#else
-        execlp("xdg-open", "xdg-open", url, (char*)NULL);
-#endif
-        _exit(127);
-    }
-    /* SIGCHLD는 부모의 기존 핸들러가 reap (없으면 좀비; 짧은 수명이므로 OK) */
-}
 
 /* ── Focus navigation ────────────────────────────────────────────────────── */
 
@@ -730,31 +706,7 @@ static void do_focus(int dir)
 
 /* ── 키바인딩 매칭 ───────────────────────────────────────────────────────── */
 
-static int keybind_matches(const char *binding, unsigned int mods, int glfw_key)
-{
-    if (!binding || !binding[0]) return 0;
-
-    char buf[64];
-    strncpy(buf, binding, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
-
-    unsigned int req_mods = 0;
-    char *p = buf;
-    char *plus;
-
-    while ((plus = strchr(p, '+')) != NULL) {
-        *plus = '\0';
-        if      (strcmp(p, "Alt")   == 0) req_mods |= INPUT_MOD_ALT;
-        else if (strcmp(p, "Ctrl")  == 0) req_mods |= INPUT_MOD_CTRL;
-        else if (strcmp(p, "Shift") == 0) req_mods |= INPUT_MOD_SHIFT;
-        p = plus + 1;
-    }
-
-    int req_key = input_glfw_key_from_name(p);
-    if (req_key < 0) return 0;
-
-    return (mods == req_mods) && (glfw_key == req_key);
-}
+/* keybind_matches → ui/input.{c,h} */
 
 /* ── 선택 텍스트 추출 ────────────────────────────────────────────────────── */
 

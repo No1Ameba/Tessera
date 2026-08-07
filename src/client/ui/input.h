@@ -51,6 +51,12 @@ unsigned int input_glfw_mods(int glfw_mods);
 int input_glfw_key_from_name(const char *name);
 
 /*
+ * "Mod+Key" 바인딩 문자열(예: "Ctrl+Shift+c", "Alt+minus")이 주어진
+ * modifier 플래그 + GLFW 키와 정확히 일치하는지 검사. 일치 시 1.
+ */
+int keybind_matches(const char *binding, unsigned int mods, int glfw_key);
+
+/*
  * Translate a mouse event to SGR escape sequence bytes.
  * col, row: 1-based terminal cell coordinates
  * button: 0=left, 1=middle, 2=right, 3=release (when press=0)
