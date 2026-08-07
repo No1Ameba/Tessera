@@ -4,6 +4,7 @@ if(TERMEMU_BUILD_APPS)
         main.c
         font_resolve.c
         pane_store.c
+        text_select.c
         screen.c
         ipc_client.c
         renderer/gl_renderer.c
