@@ -18,6 +18,12 @@ struct font_face {
     int        cell_width;
     int        cell_height;
     int        ascender;
+    /* Fallback chain: consulted (in order) when the primary face lacks a
+     * glyph for a codepoint. Loaded at the same pixel size as the primary. */
+    FT_Face    fallback[FONT_MAX_FALLBACK];
+    int        fallback_count;
+    float      size_pt;   /* remembered so fallbacks match the primary size */
+    int        dpi;
 };
 
 font_face_t *font_face_load(const char *path, float size_pt, int dpi)
@@ -36,6 +42,8 @@ font_face_t *font_face_load(const char *path, float size_pt, int dpi)
         FT_Done_Face(f->face);
         FT_Done_FreeType(f->library); free(f); return NULL;
     }
+    f->size_pt = size_pt;
+    f->dpi     = dpi;
 
     /* Compute cell metrics from the face's size metrics (all in 26.6 fixed point). */
     f->ascender    = (int)(f->face->size->metrics.ascender >> 6);
@@ -64,19 +72,49 @@ void font_face_destroy(font_face_t *f)
 {
     if (!f) return;
     if (f->hb_font) hb_font_destroy(f->hb_font);
+    for (int i = 0; i < f->fallback_count; i++)
+        if (f->fallback[i]) FT_Done_Face(f->fallback[i]);
     if (f->face)    FT_Done_Face(f->face);
     if (f->library) FT_Done_FreeType(f->library);
     free(f);
 }
 
+int font_face_add_fallback(font_face_t *f, const char *path)
+{
+    if (!f || !path || f->fallback_count >= FONT_MAX_FALLBACK) return -1;
+
+    FT_Face face = NULL;
+    /* Share the primary's FT_Library. Face index 0 covers Hangul for the
+     * common Noto Sans CJK .ttc. */
+    if (FT_New_Face(f->library, path, 0, &face) != 0) return -1;
+    if (FT_Set_Char_Size(face, 0, (FT_F26Dot6)(f->size_pt * 64.0f),
+                         f->dpi, f->dpi) != 0) {
+        FT_Done_Face(face);
+        return -1;
+    }
+    f->fallback[f->fallback_count++] = face;
+    return 0;
+}
+
 int font_rasterize(font_face_t *f, uint32_t codepoint,
                    uint8_t **bitmap_out, glyph_metrics_t *metrics_out)
 {
+    /* Pick the first face that actually has this codepoint. Fall back to the
+     * primary's .notdef (gidx 0 → visible box) when nothing covers it, which
+     * is still better than a silently blank cell. */
+    FT_Face use  = f->face;
     FT_UInt gidx = FT_Get_Char_Index(f->face, codepoint);
-    if (FT_Load_Glyph(f->face, gidx, FT_LOAD_RENDER) != 0)
+    if (gidx == 0) {
+        for (int i = 0; i < f->fallback_count; i++) {
+            FT_UInt g = FT_Get_Char_Index(f->fallback[i], codepoint);
+            if (g != 0) { use = f->fallback[i]; gidx = g; break; }
+        }
+    }
+
+    if (FT_Load_Glyph(use, gidx, FT_LOAD_RENDER) != 0)
         return -1;
 
-    FT_GlyphSlot slot = f->face->glyph;
+    FT_GlyphSlot slot = use->glyph;
     FT_Bitmap   *bm   = &slot->bitmap;
 
     metrics_out->bearing_x = slot->bitmap_left;

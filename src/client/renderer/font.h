@@ -46,6 +46,19 @@ font_face_t *font_face_load(const char *path, float size_pt, int dpi);
 void         font_face_destroy(font_face_t *face);
 
 /*
+ * Append a fallback face to the chain.
+ * When the primary face has no glyph for a codepoint, font_rasterize() tries
+ * the fallback faces in the order they were added (e.g. a CJK font for Hangul
+ * that the primary monospace font lacks). Loaded at the same pixel size as the
+ * primary. TTC collections are opened at face index 0.
+ * @return 0 success, -1 on failure (bad path, load error, or chain full)
+ */
+int font_face_add_fallback(font_face_t *face, const char *path);
+
+/* Maximum number of fallback faces per chain. */
+#define FONT_MAX_FALLBACK 4
+
+/*
  * Rasterize one Unicode codepoint.
  * *bitmap_out receives a malloc'd 8-bit grayscale buffer (width × height bytes).
  * May be NULL if the glyph has no bitmap (e.g. space). Caller frees with
