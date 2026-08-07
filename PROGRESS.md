@@ -137,7 +137,7 @@
 7. [x] **OSC 8 하이퍼링크:** 클릭 가능한 URL ✅
 8. [ ] **Kitty Image Protocol:** 이미지 인라인 표시
 9. [x] **크래시 복구:** 데몬 상태 저장/복원 ✅
-10. [ ] **CI 파이프라인:** GitHub Actions Linux/Windows/macOS 빌드
+10. [~] **CI 파이프라인:** GitHub Actions — Linux/macOS 빌드는 `.github/workflows/ci.yml` 로 구현됨. 남은 것: Windows 잡(백엔드 스텁 구현 후), ASan/UBSan 잡(`-DTERMEMU_SANITIZE=ON`) 추가.
 11. [ ] **Kitty Keyboard Protocol:** 정밀 키 입력 (vim 미지원, 최하 우선순위)
 
 ---

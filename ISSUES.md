@@ -19,19 +19,50 @@
 
 **해결 방향(미착수)**:
 
-- **공통**: 설정에 `ui.font_family` / `terminal.font_family` 추가, 한글 지원 폰트(Noto Sans CJK KR, Nanum Gothic, Malgun Gothic) 폴백 체인 자동 탐색. TTC 파일은 내부 stbtt 가 첫 face 만 읽으므로 후보에서 배제하거나 face index 지정.
+- **공통**: 설정에 `ui.font_family` / `terminal.font_family` 추가, 한글 지원 폰트(Noto Sans CJK KR, Nanum Gothic, Malgun Gothic) 폴백 체인 자동 탐색. TTC 파일 처리는 경로별로 다름: **터미널 출력은 FreeType 을 쓰므로** `FT_New_Face` 의 face index 인자로 특정 face 선택 가능(현재 index 0 하드코딩), **Nuklear 오버레이는 내장 stb_truetype** 을 쓰므로 첫 face 만 읽힘 → TTC 후보에서 배제하거나 index 지정 필요.
 - **터미널 출력**: `font_face` 에 fallback chain 개념 추가 — 주 폰트에 글리프 없으면 한글 폰트로 shape. harfbuzz 가 없으면 codepoint-per-glyph 수준 fallback 만이라도 구현.
 - **터미널 입력**: GLFW 최신(IME preedit 지원) 로 업그레이드 혹은 플랫폼별 IME 브릿지(XIM/IBus D-Bus/WSL WIN32 input) 도입. 최소한 preedit 상태 표시라도 필요.
 - **Nuklear 오버레이**: `nk_font_config.range` 에 한글 glyph range 명시 (`0xAC00–0xD7A3` 등) + atlas 크기 확대. UI 폰트 경로도 별도 resolve.
 
 **영향 파일**:
-- 출력: `src/client/font_face.{c,h}`, `src/client/renderer/gl_renderer.c`, `src/client/main.c` (`resolve_font_path`).
+- 출력: `src/client/renderer/font.{c,h}` (FreeType/HarfBuzz — 과거 문서의 `font_face.{c,h}` 는 실존하지 않음), `src/client/renderer/gl_renderer.c`, `src/client/main.c` (`resolve_font_path`).
 - 입력: `src/client/main.c` (`char_callback`, `key_callback`), GLFW 버전 / 플랫폼별 IME 브릿지.
 - 오버레이: `src/client/ui/nk_impl.c` (폰트 베이킹), `src/client/main.c` (`nk_impl_init` 호출부).
 
 **참고 브랜치**: `fix/nk-overlay-cjk-font` 에서 Nuklear 오버레이 쪽(영역 3) 만 부분 해결 시도했으나 실제 환경에서 여전히 깨지는 것으로 보고됨(2026-04-23) — 추가 조사 필요. 미머지 상태.
 
 **우선순위**: 상 — 한국어 사용자가 터미널 본연의 기능(한글 입력/출력) 을 쓸 수 없음. Nuklear 오버레이보다 터미널 입출력이 먼저.
+
+---
+
+### [REVIEW] 전면 코드 리뷰 결과 및 백로그 (2026-08-07)
+
+멀티 에이전트로 전 서브시스템(터미널 코어 / 데몬·IPC / 렌더링 / 클라이언트·입력 / 빌드)을 리뷰하고, 신고된 findings 를 **실제 코드로 개별 검증**했다. 결론: 코드 품질은 리뷰어 1차 신고보다 **훨씬 양호**했고, "Critical" 로 신고된 상당수가 오탐이었다.
+
+**검증 결과 — 오탐(코드가 이미 올바름)**:
+- `vt_parser.c` 파라미터 오버플로/개수 미검증 → `:51` 65535 캡, `:48/:60` `VT_MAX_PARAMS` 가드 존재.
+- `screen.c delete_chars` 언더플로 → `:266` int + `:267` `if (remaining>0)` 가드.
+- `screen.c` OSC 52/8 memchr NULL 미검사 → `:633/:670` `if(!semi) return;` 존재.
+- `screen.c` SGR 음수 캐스트 → `:330-332` `<0 ? 0 :` 가드.
+- `utf8.c` overlong 처리 → `:84` seq_len 반환은 정상.
+- `ipc_server.c:419` 길이 언더플로 → `sizeof` 로 size_t 승격되어 오버플로 없음, 선검사도 존재.
+- `ipc_server.c:744` 스택 버퍼 오버플로 → `pane_count` 는 `IPC_MAX_PANES` 로 상한, 버퍼가 최악 케이스에 맞게 잡힘.
+
+**검증 결과 — 진짜였고 이번에 수정함 (branch `chore/review-hardening`)**:
+- `ipc_client.c` `ipc_client_session_save()` — 데몬이 NUL 종료 없이 보낸 JSON 페이로드를 `fputs` 로 기록해 초기화되지 않은 스택을 넘어 읽던 버그. 버퍼 제로초기화 + 여유 1바이트로 트레일링 NUL 보장하도록 수정.
+- `config.c` `theme_load_file()` / `config_load_file()` — `fread` 반환값 미검사(부분 읽기 시 잘린 버퍼 파싱). 짧은 읽기 감지 시 실패 반환.
+- `CMakeLists.txt` — `TERMEMU_SANITIZE` 옵션(ASan+UBSan) 추가. VT/IPC/config 파싱 경로 런타임 검출용.
+- 문서 정합: `renderring-spec.md` → `rendering-spec.md` 오타 수정(CLAUDE.md 링크 정상화), 위 stbtt/FreeType·`font_face.{c,h}` 오기 정정.
+
+**남은 백로그 (대형 — 각자 전용 작업으로 착수 필요, 착수는 사용자 지시 후)**:
+1. **[상] 한글 출력: 폰트 폴백 체인** — `renderer/font.{c,h}` 의 `font_t` 를 face 배열(우선순위)로 확장, 글리프 미존재 시 다음 face 로 shape. `.notdef` 도 없이 글리프가 조용히 사라지는 현행 동작 제거. 아틀라스 만석/eviction 처리 동반. 구조적으로 실현 가능.
+2. **[상] 한글 입력: IME 재설계** — 현행 `main.c` 의 pending-byte 스테이징 + `codepoint>=0x80` 휴리스틱은 취약(콜백 순서 가정, Ctrl+key 와 IME 출력 혼동). preedit 상태를 명시적 `ime_state_t` 로 추적하고 커밋 텍스트만 PTY 전송. GLFW preedit API 또는 플랫폼 IME 브릿지 필요.
+3. **[중] `main.c` 갓파일 분해** — 2254줄, 전역 60+개, 콜백이 전역 직접 변조. `app_t` 구조체로 상태 캡슐화 + 모듈 분리(input/layout/ui). IME 재설계와 병행 시 시너지.
+4. **[중] Windows 백엔드** — `platform/windows/{ipc_win,pty_win,fs_watch_win}.c` 빈 스텁. GUI(GLFW+GL)는 그대로 동작하므로 backend 3종(ConPTY / Named Pipe / ReadDirectoryChangesW)만 구현하면 됨. README 의 "크로스플랫폼" 주장은 이때까지 과장.
+5. **[중] IPC 견고성** — 프로토콜 구조체에 `packed`/명시적 직렬화·버전 협상 부재(엔디안/패딩 이식성), 느린 클라이언트에 대한 백프레셔 없음(`write_all_retry` 의 poll 이 epoll 루프 지연). 소켓 경로 `$XDG_RUNTIME_DIR` 우선 전환.
+6. **[하] 세션 `next_id` 2^32 래핑, config 핫리로드 콜백 중 발동 defer** 등.
+
+**핵심 교훈**: 이 프로젝트의 아키텍처(GPU 셀 직접 렌더 + 데몬/클라이언트 + 자체 VT 파서)는 구식이 아니라 빠른 터미널의 정석. 실제 약점은 "구조" 가 아니라 **미완성 기능축(한글·Windows)** 과 일부 견고성 하드닝. GUI 프레임워크(GLFW)는 Windows 포함 크로스플랫폼에 적합하며 GTK 흔적은 코드/문서 어디에도 없음.
 
 ---
 

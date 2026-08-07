@@ -145,9 +145,10 @@ bool theme_load_file(const char *path, termemu_theme_t *t) {
     char *buf = malloc((size_t)size + 1);
     if (!buf) { fclose(f); return false; }
 
-    fread(buf, 1, (size_t)size, f);
-    buf[size] = '\0';
+    size_t rd = fread(buf, 1, (size_t)size, f);
     fclose(f);
+    if (rd != (size_t)size) { free(buf); return false; }
+    buf[rd] = '\0';
 
     bool ok = theme_load_string(buf, t);
     free(buf);
@@ -446,9 +447,10 @@ bool config_load_file(const char *path, termemu_config_t *cfg) {
     char *buf = malloc((size_t)size + 1);
     if (!buf) { fclose(f); return false; }
 
-    fread(buf, 1, (size_t)size, f);
-    buf[size] = '\0';
+    size_t rd = fread(buf, 1, (size_t)size, f);
     fclose(f);
+    if (rd != (size_t)size) { free(buf); return false; }
+    buf[rd] = '\0';
 
     bool ok = config_load_string(buf, cfg);
     free(buf);

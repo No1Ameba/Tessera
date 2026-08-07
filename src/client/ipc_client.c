@@ -676,9 +676,13 @@ int ipc_client_session_save(ipc_client_t *c, uint32_t session_id,
                  &session_id, sizeof session_id) != 0)
         return -1;
 
-    /* daemon이 JSON 문자열을 전송한다 */
-    uint8_t json_buf[IPC_MAX_PAYLOAD_LEN];
-    if (recv_until(c, IPC_MSG_SESSION_SAVE_R, json_buf, sizeof json_buf,
+    /* daemon이 JSON 문자열을 전송한다.
+     * 프로토콜 페이로드에는 NUL 종료가 없으므로 버퍼를 0으로 초기화하고
+     * 여유 1바이트를 남겨 트레일링 NUL 을 보장한다. JSON 페이로드에는
+     * embedded NUL 이 없어 fputs 가 정확히 수신 길이만큼만 기록한다.
+     * (이전 코드는 NUL 종료를 가정해 초기화되지 않은 스택을 넘어 읽었음) */
+    uint8_t json_buf[IPC_MAX_PAYLOAD_LEN + 1] = {0};
+    if (recv_until(c, IPC_MSG_SESSION_SAVE_R, json_buf, sizeof json_buf - 1,
                     CMD_TIMEOUT_MS) < 0)
         return -1;
 
@@ -687,7 +691,6 @@ int ipc_client_session_save(ipc_client_t *c, uint32_t session_id,
     snprintf(tmp_path, sizeof tmp_path, "/tmp/termemu-snap-cli-%d.json", (int)getpid());
     FILE *fp = fopen(tmp_path, "w");
     if (!fp) return -1;
-    /* json_buf의 실제 크기는 알 수 없으므로 NULL-terminated 가정 */
     fputs((const char *)json_buf, fp);
     fclose(fp);
     int ret = session_snapshot_load(tmp_path, out);

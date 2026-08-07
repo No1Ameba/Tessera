@@ -8,6 +8,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # 빌드 옵션
 # -----------------------------------------------------------------------------
 option(TERMEMU_BUILD_APPS "데몬/클라이언트 실행 파일 빌드 (미구현 모듈 완성 후 활성화)" OFF)
+option(TERMEMU_SANITIZE "AddressSanitizer + UBSan 계측 빌드 (디버그/CI 권장)" OFF)
 
 # -----------------------------------------------------------------------------
 # 플랫폼 감지
@@ -21,6 +22,13 @@ if(MSVC)
     add_compile_options(/W4 /WX)
 else()
     add_compile_options(-Wall -Wextra -Werror -pedantic)
+endif()
+
+# 메모리/UB 계측: VT 파서·IPC·config 파싱 등 신뢰할 수 없는 입력 경로의
+# 오버런/UAF/정수 UB 를 런타임에 검출한다. 기본 OFF, CI/디버그에서 -DTERMEMU_SANITIZE=ON.
+if(TERMEMU_SANITIZE AND NOT MSVC)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address,undefined)
 endif()
 
 # -----------------------------------------------------------------------------
