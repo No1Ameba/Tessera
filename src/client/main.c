@@ -17,6 +17,7 @@
 #include <string.h>
 #include <signal.h>
 #include <time.h>
+#include <locale.h>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -228,6 +229,58 @@ static termemu_theme_t  *g_theme_mut_ptr = NULL;
 
 /* key_callback에서 처리 완료 시 char_callback 무시 */
 static int g_key_consumed = 0;
+
+/* ── IME 인지 PTY 입력 스테이징 ───────────────────────────────────────────
+ * 텍스트(IME 로 조합된 CJK 포함)는 GLFW CharCallback 으로 "커밋된" Unicode
+ * codepoint 로 도착하고, 물리 키는 KeyCallback 으로 도착한다. 둘은 경합하면
+ * 안 된다: X11/XIM IME(fcitx/ibus)가 한글 음절을 커밋할 때, 커밋을 유발한
+ * 물리 키(대개 Enter)의 KeyCallback 이 CharCallback 보다 *먼저* 불린다.
+ * Enter 의 "\r" 을 즉시 보내면 조합 문자보다 앞서 — 혹은 대신 — 셸에 닿는다.
+ *
+ * 전략: KeyCallback 은 *커밋 트리거* 키(Enter/Tab/Backspace)의 바이트를 곧장
+ * 보내지 않고 스테이징한다. 이어서 CharCallback 이 같은 poll 사이클에서 비-ASCII
+ * (>=U+0080) codepoint 를 주면 그것은 IME 커밋이므로 스테이징된 트리거를 버린다.
+ * 아니면 glfwPollEvents() 직후 스테이징 바이트를 PTY 로 flush 한다. 모호하지 않은
+ * 키(화살표/Home·End/기능키/Ctrl·Alt 조합 등)는 즉시 전송하며 스테이징하지 않아,
+ * 내비게이션에 지연이 없고 절대 잘못 드롭되지 않는다.
+ *
+ * 알려진 한계(vanilla GLFW 3.4 가 preedit 상태를 노출하지 않아 해결 불가):
+ * 진행 중인 조합을 편집/취소하는 Backspace·Escape 는 여전히 셸에 닿을 수 있다.
+ * 완전한 정확성 + 조합중 표시는 IME 지원 GLFW 빌드나 XIM/IBus 브릿지가 필요하다
+ * (ISSUES.md 참조). ASCII codepoint 는 트리거를 드롭하지 않으므로 "a<Enter>"
+ * 같은 빠른 연타가 한 poll 에 묶여도 안전하다. */
+static uint8_t g_staged_key[16];
+static int     g_staged_key_len = 0;
+
+static void flush_staged_key(void)
+{
+    if (g_staged_key_len > 0) {
+        ipc_client_pty_input(g_client, g_active_pane,
+                             g_staged_key, (size_t)g_staged_key_len);
+        g_staged_key_len = 0;
+    }
+}
+
+static int key_is_commit_trigger(int key)
+{
+    return key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER ||
+           key == GLFW_KEY_TAB   || key == GLFW_KEY_BACKSPACE;
+}
+
+/* 커밋 트리거 키는 스테이징, 그 외 특수키는 즉시 PTY 전송. */
+static void stage_or_send_key(const uint8_t *seq, int len, int commit_trigger)
+{
+    if (len <= 0) return;
+    if (commit_trigger) {
+        /* 한 poll 안에서 트리거가 둘 연속 들어오는 드문 경우: 앞엣것 먼저 flush. */
+        if (g_staged_key_len > 0) flush_staged_key();
+        if (len > (int)sizeof g_staged_key) len = (int)sizeof g_staged_key;
+        memcpy(g_staged_key, seq, (size_t)len);
+        g_staged_key_len = len;
+    } else {
+        ipc_client_pty_input(g_client, g_active_pane, seq, (size_t)len);
+    }
+}
 
 /* ── Callbacks ───────────────────────────────────────────────────────────── */
 
@@ -1254,11 +1307,13 @@ static void key_callback(GLFWwindow *win, int key, int scancode,
         }
     }
 
-    /* ── PTY 입력 (특수키) ── */
+    /* ── PTY 입력 (특수키) ──
+     * 커밋 트리거 키(Enter/Tab/Backspace)는 스테이징해 IME 조합 문자와의 순서
+     * 경합을 피하고, 그 외 특수키는 즉시 전송한다. (위 g_staged_key 주석 참조) */
     uint8_t seq[16];
     int slen = input_key_to_bytes(key, mod_flags, seq, sizeof seq);
     if (slen > 0) {
-        ipc_client_pty_input(g_client, g_active_pane, seq, (size_t)slen);
+        stage_or_send_key(seq, slen, key_is_commit_trigger(key));
         g_key_consumed = 1;
     }
 }
@@ -1273,7 +1328,21 @@ static void char_callback(GLFWwindow *win, unsigned int codepoint)
         return;
     }
 
-    /* key_callback에서 이미 처리된 경우 무시 */
+    /* 비-ASCII codepoint = IME/CJK 커밋. key_callback 이 스테이징한 커밋 트리거
+     * 키(Enter 등)는 이 텍스트를 확정하려고 IME 가 소비한 것이므로 버리고,
+     * 조합된 문자만 PTY 로 보낸다. */
+    if (codepoint >= 0x80) {
+        g_staged_key_len = 0;  /* drop staged trigger */
+        char utf8[4];
+        int len = utf8_encode(codepoint, utf8);
+        if (len > 0)
+            ipc_client_pty_input(g_client, g_active_pane,
+                                 (const uint8_t *)utf8, (size_t)len);
+        return;
+    }
+
+    /* ASCII 텍스트: key_callback 이 이미 이 키의 바이트를 냈으면(Ctrl 조합 등)
+     * 이중 전송 방지. 평범한 출력 가능 ASCII 는 g_key_consumed==0 이라 여기서 전송. */
     if (g_key_consumed) return;
 
     /* UTF-8로 인코딩해서 PTY에 전송 */
@@ -1679,6 +1748,12 @@ static void do_config_reload(void)
 
 int main(int argc, char *argv[])
 {
+    /* 프로세스 로케일을 환경(LANG/LC_*)에 맞춘다. X11 XIM(fcitx/ibus)은 이
+     * 호출이 있어야 UTF-8 로케일을 인지해 GLFW 가 input context 를 만들 수 있다.
+     * 이게 없으면 기본 "C" 로케일이라 IME 가 아예 물리지 않아 한/영 전환해도
+     * ASCII 만 입력된다. glfwInit() 보다 먼저 호출해야 한다. */
+    setlocale(LC_ALL, "");
+
     /* CLI 인자 파싱 */
     const char *remote_target = NULL;
     const char *attach_name   = NULL;
@@ -1981,6 +2056,10 @@ int main(int argc, char *argv[])
     /* ── Event loop ──────────────────────────────────────────────────────── */
     while (!glfwWindowShouldClose(g_window) && g_running) {
         glfwPollEvents();
+
+        /* key_callback 이 스테이징한 커밋 트리거 키 flush — 같은 poll 에서 IME
+         * 커밋(비-ASCII char)이 뒤따르지 않았을 때만 실제 PTY 로 전송된다. */
+        flush_staged_key();
 
         /* SIGHUP 또는 inotify → config + theme 재로드 */
         if (g_sighup || (fs_watcher && fs_watch_poll(fs_watcher) > 0)) {

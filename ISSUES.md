@@ -13,7 +13,7 @@
 
 1. **터미널 출력 (`gl_renderer`)** — `resolve_font_path("monospace")` 가 리눅스에서 보통 `DejaVuSansMono.ttf` 로 귀결되는데 여기에 Hangul Syllables(U+AC00–U+D7A3) 글리프 자체가 없음. 폰트에 없으므로 `font_face_load` 가 빈 글리프(.notdef) 를 반환 → 빈 셀로 출력. Fallback 체인(한글 폰트로 2차 lookup) 부재.
 
-2. **터미널 입력 (`char_callback` 경로)** — `main.c:1238 char_callback()` 은 GLFW 가 올려주는 Unicode codepoint 를 그대로 UTF-8 인코딩해 PTY 에 넣는 구조. 리눅스(X11/Wayland/WSL) 에서는 IME(fcitx/ibus) 가 GLFW 와 직접 연동되지 않아 조합된 한글 codepoint 가 `char_callback` 까지 도달하지 않는 경우가 많음. GLFW 의 preedit/IME API(`glfwSetPreeditCallback` 등, GLFW 3.4+ 또는 확장) 미사용.
+2. **터미널 입력 (key/char 콜백 경합)** — 진단 정정: 조합된 한글 codepoint 는 `char_callback` 까지 실제로 도달함(GLFW 3.4 X11 백엔드가 XIM `Xutf8LookupString` 사용). 진짜 원인은 커밋을 유발하는 물리 키(Enter 등)의 `key_callback` 이 char_callback 보다 먼저 불려 `\r` 을 PTY 에 즉시 쓰고 `g_key_consumed=1` 로 char_callback 을 차단 → 조합 문자가 유실되거나 순서가 뒤집힘. GLFW 3.4 바닐라는 preedit/IME 상태 API 미노출.
 
 3. **Nuklear 오버레이** — `nk_impl_init()` 에서 `nk_font_atlas_add_from_file()` 의 기본 glyph range(0x20–0xFF) 만 baked 되어 CJK 코드포인트가 아틀라스에 없음. UI 폰트도 `resolve_font_path("monospace")` 첫 매칭이라 한글 미지원 폰트가 집힐 수 있음.
 
@@ -21,12 +21,15 @@
 
 - **공통**: 설정에 `ui.font_family` / `terminal.font_family` 추가, 한글 지원 폰트(Noto Sans CJK KR, Nanum Gothic, Malgun Gothic) 폴백 체인 자동 탐색. TTC 파일 처리는 경로별로 다름: **터미널 출력은 FreeType 을 쓰므로** `FT_New_Face` 의 face index 인자로 특정 face 선택 가능(현재 index 0 하드코딩), **Nuklear 오버레이는 내장 stb_truetype** 을 쓰므로 첫 face 만 읽힘 → TTC 후보에서 배제하거나 index 지정 필요.
 - **터미널 출력**: ✅ **해결됨 (branch `feat/cjk-font-fallback`, 2026-08-07)** — `renderer/font.{c,h}` 에 fallback chain 도입. `font_face_t` 가 주 face + 폴백 face 배열(`FONT_MAX_FALLBACK`)을 들고, `font_rasterize` 가 주 face 에 글리프 없으면(`FT_Get_Char_Index==0`) 폴백 face 순회, 모두 없으면 주 face 의 `.notdef` 박스로 표시(빈 셀 방지). `main.c add_cjk_fallbacks()` 가 fontconfig `:lang=ko/ja/zh` 로 Noto CJK 등 자동 발견해 startup·핫리로드 양쪽에서 부착. 렌더러/아틀라스는 cp 키잉이라 무변경. 검증: DejaVu(한글無) 주폰트에서 '가'(U+AC00)가 Noto CJK 폴백으로 15x16 실제 글리프 래스터화(test_font 34/34, ASan 클린). 남은 확인: 실 앱에서 시각 확인.
-- **터미널 입력**: GLFW 최신(IME preedit 지원) 로 업그레이드 혹은 플랫폼별 IME 브릿지(XIM/IBus D-Bus/WSL WIN32 input) 도입. 최소한 preedit 상태 표시라도 필요.
+- **터미널 입력**: 🔶 **재설계 + 로케일 수정 (branch `feat/ime-input-redesign`, 2026-08-07, main 머지됨)**.
+    - ⚠️ **위험/미검증 (머지 시 인지)**: 현재 사용자 환경(WSLg)에서는 X11 앱으로의 IME 브릿지가 불안정해 수정 후에도 한글 입력이 안 될 수 있음(2026-08-07 사용자 보고: 한/영 전환해도 영어만). WSLg 의 알려진 한계로 추정되며 **실환경 검증은 보류한 채 머지**함. 네이티브 리눅스/정상 X11 에서는 동작 기대. 회귀 위험은 낮음(ASCII·기존 특수키 경로 무영향, setlocale 추가는 부작용 없음). 확정 판별법: `xterm` 등 다른 X11 앱에서도 한글 입력이 안 되면 WSLg 문제.
+    - **선행 근본 원인(2026-08-07 발견)**: `main.c` 에 `setlocale(LC_ALL, "")` 호출이 없어 프로세스가 기본 "C" 로케일 → GLFW 의 XIM(`XOpenIM`) 초기화가 조용히 실패 → IME 가 아예 안 물려 한/영 전환해도 ASCII 만 입력됨. 환경(fcitx5 실행, `XMODIFIERS=@im=fcitx`, `LANG=ko_KR.UTF-8`)은 정상이었음. **수정**: `glfwInit()` 이전에 `setlocale(LC_ALL, "")` 추가. 이게 있어야 아래 key/char 재설계가 의미를 가짐.
+    - **재설계**: char_callback 을 유일한 텍스트 경로로 두고, key_callback 은 커밋 트리거 키(Enter/Tab/Backspace)만 `g_staged_key` 에 스테이징 후 glfwPollEvents 직후 flush, 그 외 특수키(화살표/기능키/Ctrl·Alt 조합)는 즉시 전송. char_callback 에 비-ASCII(≥U+0080) 커밋이 오면 스테이징 트리거를 드롭 → 조합 문자만 PTY 전송. 기존 스테이징 해킹(`fix/terminal-ime-input`, 모든 특수키 지연 + 오드롭 위험) 대비 내비게이션 지연 제거·오드롭 방지·구조 정리. **남은 한계(vanilla GLFW 3.4 가 preedit 상태 미노출 → 근본 해결 불가)**: 조합 중 Backspace/Escape 로 편집·취소 시 셸에 바이트가 샐 수 있고, 조합중(preedit) 시각 표시 없음(fcitx/ibus 자체 팝업 의존). **완전 해결 경로**: IME preedit 지원 GLFW 빌드(관련 PR/포크)로 교체하거나 XIM/IBus D-Bus 브릿지 직접 구현 — 이 경우 preedit 표시까지 얻음. 별도 인프라 결정 필요.
 - **Nuklear 오버레이**: `nk_font_config.range` 에 한글 glyph range 명시 (`0xAC00–0xD7A3` 등) + atlas 크기 확대. UI 폰트 경로도 별도 resolve.
 
 **영향 파일**:
 - 출력: `src/client/renderer/font.{c,h}` (fallback chain 구현됨; FreeType/HarfBuzz — 과거 문서의 `font_face.{c,h}` 는 실존하지 않음), `src/client/renderer/gl_renderer.c`, `src/client/main.c` (`resolve_font_path`, `add_cjk_fallbacks`).
-- 입력: `src/client/main.c` (`char_callback`, `key_callback`), GLFW 버전 / 플랫폼별 IME 브릿지.
+- 입력: `src/client/main.c` (`char_callback`, `key_callback`, `stage_or_send_key`/`flush_staged_key`, `setlocale`), `src/client/ui/input.c` (`input_key_to_bytes`), GLFW 버전 / 플랫폼별 IME 브릿지.
 - 오버레이: `src/client/ui/nk_impl.c` (폰트 베이킹), `src/client/main.c` (`nk_impl_init` 호출부).
 
 **참고 브랜치**: `fix/nk-overlay-cjk-font` 에서 Nuklear 오버레이 쪽(영역 3) 만 부분 해결 시도했으나 실제 환경에서 여전히 깨지는 것으로 보고됨(2026-04-23) — 추가 조사 필요. 미머지 상태.
