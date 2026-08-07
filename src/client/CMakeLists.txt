@@ -2,6 +2,8 @@
 if(TERMEMU_BUILD_APPS)
     add_executable(termemu
         main.c
+        font_resolve.c
+        pane_store.c
         screen.c
         ipc_client.c
         renderer/gl_renderer.c

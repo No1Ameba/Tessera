@@ -32,6 +32,8 @@
 #include "renderer/font.h"
 #include "renderer/glyph_atlas.h"
 #include "renderer/gl_renderer.h"
+#include "font_resolve.h"
+#include "pane_store.h"
 #include "ipc_client.h"
 #include "ui/layout.h"
 #include "ui/input.h"
@@ -50,58 +52,11 @@
 #include "../common/session_file.h"
 #include "../platform/fs_watch.h"
 
-/* ── Pane registry ───────────────────────────────────────────────────────── */
-
-#define MAX_PANES   16
-
-typedef struct {
-    uint32_t  pane_id;
-    uint32_t  parent_pane_id;  /* 이 pane 을 만든 부모 pane (0 = 없음). 닫힐 때 포커스 복귀용 */
-    screen_t  screen;
-    int       used;
-} pane_slot_t;
-
-static pane_slot_t g_panes[MAX_PANES];
+/* ── Pane registry (→ pane_store.{c,h}) ──────────────────────────────────── */
 
 typedef struct { ipc_client_t *c; uint32_t sid; uint32_t wid;
                  int fw; int fh; } resize_ctx_t;
 static void resize_leaf_cb(layout_node_t *leaf, void *user);
-
-static pane_slot_t *pane_slot_find(uint32_t pane_id)
-{
-    for (int i = 0; i < MAX_PANES; i++)
-        if (g_panes[i].used && g_panes[i].pane_id == pane_id)
-            return &g_panes[i];
-    return NULL;
-}
-
-static pane_slot_t *pane_slot_alloc(uint32_t pane_id, int cols, int rows)
-{
-    /* 같은 pane_id 가 이미 있으면 재사용 — 중복 할당 방지 */
-    pane_slot_t *existing = pane_slot_find(pane_id);
-    if (existing) return existing;
-
-    extern int g_scrollback_lines;  /* 아래 전역 선언 */
-    int sb = g_scrollback_lines > 0 ? g_scrollback_lines : 1000;
-    for (int i = 0; i < MAX_PANES; i++) {
-        if (!g_panes[i].used) {
-            g_panes[i].pane_id        = pane_id;
-            g_panes[i].parent_pane_id = 0;
-            g_panes[i].used           = 1;
-            screen_init(&g_panes[i].screen, cols, rows, sb);
-            return &g_panes[i];
-        }
-    }
-    return NULL;
-}
-
-static void pane_slot_free(uint32_t pane_id)
-{
-    pane_slot_t *s = pane_slot_find(pane_id);
-    if (!s) return;
-    screen_destroy(&s->screen);
-    s->used = 0;
-}
 
 /* ── Global state ────────────────────────────────────────────────────────── */
 
@@ -342,8 +297,8 @@ static void on_pane_exited(uint32_t pane_id, void *user)
         /* 3순위: g_panes 배열 순회 fallback */
         if (!next) {
             for (int i = 0; i < MAX_PANES; i++) {
-                if (g_panes[i].used && g_panes[i].pane_id != pane_id) {
-                    next = g_panes[i].pane_id;
+                if (pane_slot_at(i)->used && pane_slot_at(i)->pane_id != pane_id) {
+                    next = pane_slot_at(i)->pane_id;
                     break;
                 }
             }
@@ -437,7 +392,7 @@ static void on_pane_split(uint32_t session_id, uint32_t window_id,
     int new_nc = new_leaf->rect.w / fw; if (new_nc < 1) new_nc = 1;
     int new_nr = new_leaf->rect.h / fh; if (new_nr < 1) new_nr = 1;
 
-    pane_slot_t *ns = pane_slot_alloc(new_pane_id, new_nc, new_nr);
+    pane_slot_t *ns = pane_slot_alloc(new_pane_id, new_nc, new_nr, g_scrollback_lines);
     if (ns) {
         ns->parent_pane_id = parent_pane_id;
         if (g_theme) screen_apply_theme(&ns->screen, g_theme);
@@ -451,73 +406,6 @@ static void on_pane_split(uint32_t session_id, uint32_t window_id,
     if (par_slot) screen_resize(&par_slot->screen, par_nc, par_nr);
 
     g_dirty = 1;
-}
-
-/* ── 폰트 경로 해석 ──────────────────────────────────────────────────────── */
-
-static const char *resolve_font_path(const char *name, char *buf, size_t bufsz)
-{
-    if (name && name[0] == '/') {
-        FILE *f = fopen(name, "rb");
-        if (f) { fclose(f); return name; }
-    }
-#ifndef _WIN32
-    if (name && name[0]) {
-        char cmd[512];
-        snprintf(cmd, sizeof cmd, "fc-match --format='%%{file}' '%s' 2>/dev/null", name);
-        FILE *p = popen(cmd, "r");
-        if (p) {
-            size_t n = fread(buf, 1, bufsz - 1, p);
-            pclose(p);
-            if (n > 0) {
-                buf[n] = '\0';
-                if (buf[n-1] == '\n') buf[--n] = '\0';
-                FILE *f = fopen(buf, "rb");
-                if (f) { fclose(f); return buf; }
-            }
-        }
-    }
-#endif
-    static const char *fallbacks[] = {
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeMono.ttf",
-        "C:\\Windows\\Fonts\\consola.ttf",
-        NULL
-    };
-    for (int i = 0; fallbacks[i]; i++) {
-        FILE *f = fopen(fallbacks[i], "rb");
-        if (f) { fclose(f); return fallbacks[i]; }
-    }
-    return name;
-}
-
-/*
- * Attach CJK (한중일) fallback fonts so codepoints the primary monospace font
- * lacks — most importantly Hangul (U+AC00–U+D7A3) — still render instead of
- * showing a blank cell. Uses fontconfig (:lang=…) to locate a covering face
- * per script, skipping the primary itself and duplicates (ko/ja/zh commonly
- * resolve to a single pan-CJK file such as Noto Sans CJK).
- */
-static void add_cjk_fallbacks(font_face_t *font, const char *primary_path)
-{
-    static const char *patterns[] = { ":lang=ko", ":lang=ja", ":lang=zh-cn", NULL };
-    char added[FONT_MAX_FALLBACK][512];
-    int  n_added = 0;
-    for (int i = 0; patterns[i] && n_added < FONT_MAX_FALLBACK; i++) {
-        char buf[512] = {0};
-        const char *p = resolve_font_path(patterns[i], buf, sizeof buf);
-        /* resolve_font_path echoes the pattern back (":lang=…") when fc-match
-         * finds nothing → not an absolute path; skip those. */
-        if (!p || p[0] != '/') continue;
-        if (primary_path && strcmp(p, primary_path) == 0) continue;
-        int dup = 0;
-        for (int k = 0; k < n_added; k++)
-            if (strcmp(added[k], p) == 0) { dup = 1; break; }
-        if (dup) continue;
-        if (font_face_add_fallback(font, p) == 0)
-            strncpy(added[n_added++], p, sizeof added[0] - 1);
-    }
 }
 
 /* ── Split helpers ───────────────────────────────────────────────────────── */
@@ -573,7 +461,7 @@ static void do_split(layout_node_type_t dir)
     int new_nc = new_leaf->rect.w / fw; if (new_nc < 1) new_nc = 1;
     int new_nr = new_leaf->rect.h / fh; if (new_nr < 1) new_nr = 1;
     {
-        pane_slot_t *ns = pane_slot_alloc(new_pane_id, new_nc, new_nr);
+        pane_slot_t *ns = pane_slot_alloc(new_pane_id, new_nc, new_nr, g_scrollback_lines);
         if (ns) {
             ns->parent_pane_id = g_active_pane;
             if (g_theme) screen_apply_theme(&ns->screen, g_theme);
@@ -609,8 +497,8 @@ static void close_pane_now(void)
     /* 3순위: g_panes 배열 순회 fallback */
     if (!next_pane) {
         for (int i = 0; i < MAX_PANES; i++) {
-            if (g_panes[i].used && g_panes[i].pane_id != g_active_pane) {
-                next_pane = g_panes[i].pane_id;
+            if (pane_slot_at(i)->used && pane_slot_at(i)->pane_id != g_active_pane) {
+                next_pane = pane_slot_at(i)->pane_id;
                 break;
             }
         }
@@ -1114,7 +1002,8 @@ static void session_attach_setup(uint32_t sid, int cols, int rows, int fw, int f
     /* 1) pane_slot 생성 (모든 pane 에 대해) */
     for (int i = 0; i < pane_count; i++) {
         pane_slot_t *ps = pane_slot_alloc(panes[i].pane_id,
-                                           panes[i].cols, panes[i].rows);
+                                           panes[i].cols, panes[i].rows,
+                                           g_scrollback_lines);
         if (ps) {
             screen_apply_theme(&ps->screen, g_theme);
             screen_set_clipboard_cb(&ps->screen, on_clipboard_set, NULL);
@@ -1167,7 +1056,7 @@ static void session_new_setup(const char *name, int cols, int rows)
     uint32_t first_pane = 0;
     ipc_client_pane_create(g_client, g_session_id, g_window_id,
                             (uint16_t)cols, (uint16_t)rows, &first_pane);
-    pane_slot_t *first_slot = pane_slot_alloc(first_pane, cols, rows);
+    pane_slot_t *first_slot = pane_slot_alloc(first_pane, cols, rows, g_scrollback_lines);
     if (first_slot) {
         screen_apply_theme(&first_slot->screen, g_theme);
         screen_set_clipboard_cb(&first_slot->screen, on_clipboard_set, NULL);
@@ -1678,8 +1567,8 @@ static void do_config_reload(void)
     }
 
     for (int i = 0; i < MAX_PANES; i++)
-        if (g_panes[i].used)
-            screen_update_palette(&g_panes[i].screen, g_theme);
+        if (pane_slot_at(i)->used)
+            screen_update_palette(&pane_slot_at(i)->screen, g_theme);
 
     {
         float br = ((g_theme_mut_ptr->background >> 16) & 0xFF) / 255.0f;
@@ -1967,7 +1856,7 @@ int main(int argc, char *argv[])
                 uint32_t pid = 0;
                 ipc_client_pane_create(g_client, g_session_id, wid, pc, pr, &pid);
 
-                pane_slot_t *ps = pane_slot_alloc(pid, pc, pr);
+                pane_slot_t *ps = pane_slot_alloc(pid, pc, pr, g_scrollback_lines);
                 if (ps) {
                     screen_apply_theme(&ps->screen, g_theme);
                     screen_set_clipboard_cb(&ps->screen, on_clipboard_set, NULL);
@@ -2290,7 +2179,7 @@ int main(int argc, char *argv[])
 
     /* ── Cleanup ─────────────────────────────────────────────────────────── */
     for (int i = 0; i < MAX_PANES; i++)
-        if (g_panes[i].used) screen_destroy(&g_panes[i].screen);
+        if (pane_slot_at(i)->used) screen_destroy(&pane_slot_at(i)->screen);
 
     /* 세션은 데몬에서 수명 관리 (모든 클라이언트 detach 후 5분 idle → 자동 destroy).
      * 여기서 명시적으로 destroy 하지 않는다 — 재접속 가능하도록 유지. */
