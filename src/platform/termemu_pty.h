@@ -18,13 +18,30 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <sys/types.h>  /* pid_t */
+#ifdef _WIN32
+#  include <basetsd.h>
+typedef SSIZE_T ssize_t;   /* MSVC 에는 ssize_t 가 없다 */
+#else
+#  include <sys/types.h>   /* pid_t, ssize_t */
+#endif
 
 /* ─── 타입 ───────────────────────────────────────────────────────────────── */
 
 typedef struct {
+#ifdef _WIN32
+    /* ConPTY 백엔드(pty_win.c). HANDLE 은 헤더에서 windows.h 를 강제하지 않도록
+     * void* 로 보관한다. master_fd/child_pid 는 공유 코드 호환용(데몬은 Windows
+     * 에서 별도 IOCP 이벤트 루프 포팅이 필요하므로 이 fd 는 실사용되지 않는다). */
+    void   *hpcon;      /* HPCON 의사 콘솔 */
+    void   *hproc;      /* 자식 프로세스 HANDLE */
+    void   *hin;        /* 자식 stdin 쓰기 핸들 (우리가 write) */
+    void   *hout;       /* 자식 stdout/err 읽기 핸들 (우리가 read) */
+    int     master_fd;  /* 미사용(-1) */
+    int     child_pid;  /* dwProcessId */
+#else
     int     master_fd;  /* PTY 마스터 파일 디스크립터 */
     pid_t   child_pid;  /* 스폰된 자식 프로세스 PID */
+#endif
 } pty_t;
 
 /* ─── API ────────────────────────────────────────────────────────────────── */

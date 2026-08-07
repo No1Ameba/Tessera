@@ -30,6 +30,12 @@ target_link_libraries(termemu_ipc
     PUBLIC termemu_common
 )
 
+# Windows: GetUserNameA(advapi32). Named Pipe/ConPTY/ReadDirectoryChangesW 는
+# kernel32(기본 링크). POSIX 에는 영향 없음.
+if(WIN32)
+    target_link_libraries(termemu_ipc PRIVATE advapi32)
+endif()
+
 # 전체 플랫폼 라이브러리 (fswatch 포함) — 앱 빌드 시에만
 if(TERMEMU_BUILD_APPS)
     add_library(termemu_platform STATIC ${FSWATCH_SOURCE})
