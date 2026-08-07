@@ -275,9 +275,11 @@ typedef struct {
 
 /* ─── 소켓 경로 ──────────────────────────────────────────────────────────── */
 
-/* POSIX: /tmp/termemu-<uid>.sock  (런타임에 uid 치환) */
+/* POSIX 소켓 경로: $XDG_RUNTIME_DIR/termemu-<uid>.sock 우선, 없으면 아래 /tmp
+ * 폴백 포맷 사용 (ipc_socket_path() 참조). MAX 는 sockaddr_un.sun_path(108) 에
+ * 맞춰 XDG_RUNTIME_DIR 이 길어도 여유를 둔다. */
 #define IPC_SOCKET_PATH_FMT  "/tmp/termemu-%u.sock"
-#define IPC_SOCKET_PATH_MAX  64
+#define IPC_SOCKET_PATH_MAX  108
 
 /* Windows: \\.\pipe\termemu-<username> */
 #define IPC_PIPE_NAME_FMT    "\\\\.\\pipe\\termemu-%s"
