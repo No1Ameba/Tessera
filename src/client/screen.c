@@ -3,6 +3,7 @@
 #include "../common/config.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 /* ── 색상 테이블 ─────────────────────────────────────────────────────────── */
 
@@ -445,6 +446,13 @@ static int prev_tab_stop(const screen_t *s, int from)
     return 0;
 }
 
+/* 터미널 → 앱 리플라이(DSR/CPR/DA)를 PTY stdin 으로 전달. 콜백 미설정 시 무시. */
+static void send_reply(screen_t *s, const char *bytes, size_t len)
+{
+    if (s->reply_cb && bytes && len)
+        s->reply_cb(bytes, len, s->reply_user);
+}
+
 /* ── VT 콜백 ─────────────────────────────────────────────────────────────── */
 
 static void cb_print(void *ctx, uint32_t cp)
@@ -542,6 +550,21 @@ static void cb_csi(void *ctx,
             for (int k = 0; k < n; k++) print_char(s, s->last_print_cp);
         break;
     }
+    case 'n':                                     /* DSR — 장치 상태 보고 */
+        if (p0 == 6) {                            /* CPR — 커서 위치 (1-based) */
+            char rep[32];
+            int rl = snprintf(rep, sizeof rep, "\x1b[%d;%dR", s->cy + 1, s->cx + 1);
+            if (rl > 0) send_reply(s, rep, (size_t)rl);
+        } else if (p0 == 5) {                     /* 터미널 정상 */
+            send_reply(s, "\x1b[0n", 4);
+        }
+        break;
+    case 'c':                                     /* DA — 장치 속성 */
+        if (inter && inter[0] == '>')
+            send_reply(s, "\x1b[>0;10;1c", strlen("\x1b[>0;10;1c")); /* 2차 DA */
+        else
+            send_reply(s, "\x1b[?1;2c", strlen("\x1b[?1;2c"));       /* 1차 DA (VT100+AVO) */
+        break;
     case 'd':                                     /* VPA */
         s->cy = iclamp((p0 ? p0 : 1) - 1, 0, s->rows - 1);
         break;
@@ -989,6 +1012,15 @@ void screen_set_clipboard_cb(screen_t *s,
     if (!s) return;
     s->clipboard_cb   = cb;
     s->clipboard_user = user;
+}
+
+void screen_set_reply_cb(screen_t *s,
+                          void (*cb)(const char *bytes, size_t len, void *user),
+                          void *user)
+{
+    if (!s) return;
+    s->reply_cb   = cb;
+    s->reply_user = user;
 }
 
 const char *screen_link_url(const screen_t *s, uint16_t link_id)

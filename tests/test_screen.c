@@ -529,6 +529,46 @@ static void test_rep(void)
     printf("[PASS] test_rep\n");
 }
 
+/* 리플라이(DSR/CPR/DA) 캡처용 */
+static char   g_reply[64];
+static void capture_reply(const char *bytes, size_t len, void *user)
+{
+    (void)user;
+    if (len > sizeof g_reply - 1) len = sizeof g_reply - 1;
+    memcpy(g_reply, bytes, len);
+    g_reply[len] = '\0';
+}
+
+static void test_reports(void)
+{
+    screen_t s;
+    assert(screen_init(&s, 80, 24, 500) == 0);
+    screen_set_reply_cb(&s, capture_reply, NULL);
+
+    /* CPR: CUP 로 (row3,col6, 1-based) 이동 후 CSI 6 n → "\x1b[3;6R" */
+    g_reply[0] = 0;
+    feed(&s, "\x1b[3;6H\x1b[6n");
+    CHECK(strcmp(g_reply, "\x1b[3;6R") == 0, "CPR: row3;col6");
+
+    /* DSR 5n → "\x1b[0n" (터미널 정상) */
+    g_reply[0] = 0;
+    feed(&s, "\x1b[5n");
+    CHECK(strcmp(g_reply, "\x1b[0n") == 0, "DSR 5: OK");
+
+    /* 1차 DA: CSI c → "\x1b[?1;2c" */
+    g_reply[0] = 0;
+    feed(&s, "\x1b[c");
+    CHECK(strcmp(g_reply, "\x1b[?1;2c") == 0, "DA1: VT100+AVO");
+
+    /* 2차 DA: CSI > c → "\x1b[>0;10;1c" */
+    g_reply[0] = 0;
+    feed(&s, "\x1b[>c");
+    CHECK(strcmp(g_reply, "\x1b[>0;10;1c") == 0, "DA2: secondary");
+
+    screen_destroy(&s);
+    printf("[PASS] test_reports\n");
+}
+
 int main(void)
 {
     test_basic_print();
@@ -553,9 +593,10 @@ int main(void)
     test_mouse_mode();
     test_bracketed_paste();
     test_cursor_style();
-    /* VT 완성도: 탭 정지 + REP */
+    /* VT 완성도: 탭 정지 + REP + 리포트(DSR/CPR/DA) */
     test_tab_stops();
     test_rep();
+    test_reports();
 
     if (failures == 0) {
         printf("\nAll tests passed.\n");

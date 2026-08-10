@@ -94,6 +94,11 @@ typedef struct {
     void (*clipboard_cb)(const char *text, void *user);
     void  *clipboard_user;
 
+    /* 리플라이 콜백 — DSR/CPR/DA 등 터미널이 앱에 되돌려 보내는 바이트를
+     * PTY stdin 으로 전달한다(키 입력과 동일 경로). */
+    void (*reply_cb)(const char *bytes, size_t len, void *user);
+    void  *reply_user;
+
     /* OSC 8 하이퍼링크 테이블 */
     struct {
         uint16_t id;
@@ -216,6 +221,14 @@ void screen_update_palette(screen_t *s, const tessera_theme_t *t);
 void screen_set_clipboard_cb(screen_t *s,
                               void (*cb)(const char *text, void *user),
                               void *user);
+
+/*
+ * 리플라이 콜백 설정 — DSR/CPR/DA 응답 바이트를 PTY stdin 으로 전달할 함수.
+ * 미설정 시 해당 질의는 조용히 무시된다.
+ */
+void screen_set_reply_cb(screen_t *s,
+                          void (*cb)(const char *bytes, size_t len, void *user),
+                          void *user);
 
 /* link_id 로 저장된 URL 을 조회한다. 없으면 NULL. */
 const char *screen_link_url(const screen_t *s, uint16_t link_id);
