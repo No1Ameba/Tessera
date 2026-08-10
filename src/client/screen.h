@@ -24,6 +24,19 @@
 /* 탭 정지 비트맵 크기. 이보다 넓은 열은 기본 8칸 간격으로 폴백한다. */
 #define SCREEN_TAB_MAX 1024
 
+/*
+ * DECSC(ESC 7)/DECRC(ESC 8) 로 저장·복원되는 커서 상태 묶음.
+ * DEC 스펙상 위치뿐 아니라 SGR 속성·원점 모드(DECOM)·wrap 대기 플래그까지 포함한다.
+ */
+typedef struct {
+    int     cx, cy;
+    uint8_t fg_r, fg_g, fg_b;
+    uint8_t bg_r, bg_g, bg_b;
+    uint8_t attrs;
+    int     origin_mode;
+    int     pending_wrap;
+} screen_cursor_save_t;
+
 typedef struct {
     int cols, rows;
     int scrollback_max;    /* 스크롤백 버퍼 최대 줄 수 */
@@ -34,8 +47,8 @@ typedef struct {
     term_cell_t *alt_cells;   /* 대체 화면 */
     int          use_alt;
 
-    /* 메인 화면으로 돌아올 때 복원할 커서 */
-    int main_cx, main_cy;
+    /* ?1049 로 대체 화면에 진입할 때 저장해 둔 메인 화면 커서 상태 */
+    screen_cursor_save_t saved_1049;
 
     /* 스크롤백 링 버퍼 [scrollback_max * cols] */
     term_cell_t *scrollback;
@@ -54,7 +67,12 @@ typedef struct {
 
     /* 커서 */
     int cx, cy;
-    int saved_cx, saved_cy;
+
+    /* SCOSC/SCORC (CSI s / CSI u) — ANSI.SYS 계열, 위치만 저장한다. */
+    int sco_cx, sco_cy;
+
+    /* DECSC/DECRC 저장 슬롯 — 화면별로 하나씩([0]=메인, [1]=대체, xterm 동작). */
+    screen_cursor_save_t saved[2];
 
     /* 스크롤 영역 (0-based, inclusive) */
     int scroll_top, scroll_bot;
@@ -66,6 +84,11 @@ typedef struct {
 
     /* 줄 끝 자동 개행 대기 플래그 */
     int pending_wrap;
+
+    /* DECOM(?6) — 커서 원점이 스크롤 영역 상단. CUP/HVP/VPA/CPR 이 상대 좌표가 된다. */
+    int origin_mode;
+    /* DECAWM(?7) — 줄 끝 자동 개행 (기본 1). 0 이면 마지막 칸에 덮어쓴다. */
+    int autowrap;
 
     /* 마우스 추적 모드 */
     int mouse_mode;         /* SCREEN_MOUSE_NONE / X10 / SGR */

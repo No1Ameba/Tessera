@@ -123,6 +123,46 @@ static void cur_right(screen_t *s, int n)
     s->cx = imin(s->cols - 1, s->cx + n);
 }
 
+/* ── 원점 모드 (DECOM) ───────────────────────────────────────────────────── */
+
+/* 커서 원점 행. DECOM 이 켜져 있으면 스크롤 영역 상단이 1행이 된다. */
+static int origin_row(const screen_t *s) { return s->origin_mode ? s->scroll_top : 0; }
+
+/* 절대 위치 지정(CUP/HVP/VPA)으로 도달 가능한 최하단 행. */
+static int bottom_row(const screen_t *s)
+{
+    return s->origin_mode ? s->scroll_bot : s->rows - 1;
+}
+
+/* 1-based 행 번호로 커서를 옮긴다. DECOM 이면 스크롤 영역 기준 상대 좌표. */
+static void set_row(screen_t *s, int row_1based)
+{
+    s->cy = iclamp(origin_row(s) + row_1based - 1, origin_row(s), bottom_row(s));
+}
+
+/* ── 커서 상태 저장/복원 (DECSC/DECRC) ───────────────────────────────────── */
+
+static void cursor_save_to(const screen_t *s, screen_cursor_save_t *dst)
+{
+    dst->cx = s->cx; dst->cy = s->cy;
+    dst->fg_r = s->fg_r; dst->fg_g = s->fg_g; dst->fg_b = s->fg_b;
+    dst->bg_r = s->bg_r; dst->bg_g = s->bg_g; dst->bg_b = s->bg_b;
+    dst->attrs        = s->attrs;
+    dst->origin_mode  = s->origin_mode;
+    dst->pending_wrap = s->pending_wrap;
+}
+
+static void cursor_restore_from(screen_t *s, const screen_cursor_save_t *src)
+{
+    s->fg_r = src->fg_r; s->fg_g = src->fg_g; s->fg_b = src->fg_b;
+    s->bg_r = src->bg_r; s->bg_g = src->bg_g; s->bg_b = src->bg_b;
+    s->attrs        = src->attrs;
+    s->origin_mode  = src->origin_mode;
+    s->cx           = iclamp(src->cx, 0, s->cols - 1);
+    s->cy           = iclamp(src->cy, 0, s->rows - 1);
+    s->pending_wrap = src->pending_wrap;
+}
+
 /* 커서 y가 스크롤 영역 아래이면 스크롤 */
 static void newline(screen_t *s)
 {
@@ -153,8 +193,10 @@ static void print_char(screen_t *s, uint32_t cp)
     int w = utf8_char_width(cp);
     if (w <= 0) w = 1;  /* combining/control → 1칸 처리 */
 
-    /* wide char가 줄 끝 한 칸에 들어갈 수 없으면 그 칸을 공백으로 하고 줄바꿈 */
+    /* wide char가 줄 끝 한 칸에 들어갈 수 없으면 그 칸을 공백으로 하고 줄바꿈.
+     * DECAWM 해제 상태면 개행할 수 없으므로 출력 자체를 생략한다. */
     if (w == 2 && s->cx == s->cols - 1) {
+        if (!s->autowrap) return;
         term_cell_t bl = blank_cell(s);
         s->cells[s->cy * s->cols + s->cx] = bl;
         s->cx = 0;
@@ -184,7 +226,8 @@ static void print_char(screen_t *s, uint32_t cp)
     if (next < s->cols) {
         s->cx = next;
     } else {
-        s->pending_wrap = 1;
+        /* DECAWM 해제 시에는 줄 끝에 머무르며 계속 덮어쓴다. */
+        s->pending_wrap = s->autowrap ? 1 : 0;
         s->cx = s->cols - 1;
     }
 }
@@ -381,7 +424,16 @@ static void handle_mode(screen_t *s, const int *p, size_t n,
     for (size_t i = 0; i < n; i++) {
         int m = (p[i] < 0) ? 0 : p[i];
         if (priv) {
-            if (m == 25) {
+            if (m == 6) {
+                /* DECOM — 설정/해제 어느 쪽이든 커서를 원점으로 되돌린다. */
+                s->origin_mode = set ? 1 : 0;
+                s->cx = 0;
+                s->cy = origin_row(s);
+                s->pending_wrap = 0;
+            } else if (m == 7) {
+                s->autowrap = set ? 1 : 0;
+                if (!set) s->pending_wrap = 0;
+            } else if (m == 25) {
                 s->cursor_hidden = set ? 0 : 1;
             } else if (m == 1000) {
                 s->mouse_mode = set ? SCREEN_MOUSE_X10 : SCREEN_MOUSE_NONE;
@@ -396,8 +448,7 @@ static void handle_mode(screen_t *s, const int *p, size_t n,
                 if (set && !s->use_alt) {
                     memcpy(s->main_cells, s->cells,
                            (size_t)s->rows * s->cols * sizeof(term_cell_t));
-                    s->main_cx = s->cx;
-                    s->main_cy = s->cy;
+                    cursor_save_to(s, &s->saved_1049);
                     memset(s->alt_cells, 0,
                            (size_t)s->rows * s->cols * sizeof(term_cell_t));
                     /* alt_cells를 기본 배경으로 초기화 */
@@ -407,15 +458,53 @@ static void handle_mode(screen_t *s, const int *p, size_t n,
                     s->cells = s->alt_cells;
                     s->use_alt = 1;
                     s->cx = 0; s->cy = 0;
+                    s->pending_wrap = 0;
                 } else if (!set && s->use_alt) {
                     s->cells = s->main_cells;
                     s->use_alt = 0;
-                    s->cx = s->main_cx;
-                    s->cy = s->main_cy;
+                    cursor_restore_from(s, &s->saved_1049);
                 }
             }
         }
     }
+}
+
+/*
+ * DECRQM 응답용 모드 상태 조회.
+ * 반환값은 DECRPM 의 Pm 필드 — 0=미지원, 1=설정됨, 2=해제됨.
+ */
+static int query_mode(const screen_t *s, int priv, int m)
+{
+    if (!priv) return 0;   /* ANSI 표준 모드(IRM/LNM 등)는 미구현 */
+    switch (m) {
+    case 6:    return s->origin_mode      ? 1 : 2;   /* DECOM */
+    case 7:    return s->autowrap         ? 1 : 2;   /* DECAWM */
+    case 25:   return s->cursor_hidden    ? 2 : 1;   /* DECTCEM (역논리) */
+    case 1000: return s->mouse_mode == SCREEN_MOUSE_X10 ? 1 : 2;
+    case 1006: return s->mouse_mode == SCREEN_MOUSE_SGR ? 1 : 2;
+    case 1049: return s->use_alt          ? 1 : 2;
+    case 2004: return s->bracketed_paste  ? 1 : 2;
+    case 2026: return s->sync_output      ? 1 : 2;
+    default:   return 0;
+    }
+}
+
+/*
+ * DECALN (ESC # 8) — VT100 화면 정렬 테스트.
+ * 화면 전체를 'E' 로 채우고 스크롤 여백과 커서를 초기화한다.
+ */
+static void align_test(screen_t *s)
+{
+    term_cell_t c = {0};
+    c.codepoint = 'E';
+    c.fg_r = s->default_fg_r; c.fg_g = s->default_fg_g; c.fg_b = s->default_fg_b;
+    c.bg_r = s->default_bg_r; c.bg_g = s->default_bg_g; c.bg_b = s->default_bg_b;
+    for (int i = 0; i < s->rows * s->cols; i++) s->cells[i] = c;
+
+    s->scroll_top = 0;
+    s->scroll_bot = s->rows - 1;
+    s->cx = 0; s->cy = 0;
+    s->pending_wrap = 0;
 }
 
 /* ── 탭 정지 ─────────────────────────────────────────────────────────────── */
@@ -519,7 +608,7 @@ static void cb_csi(void *ctx,
         break;
     case 'H':                                     /* CUP */
     case 'f':                                     /* HVP */
-        s->cy = iclamp((p0 ? p0 : 1) - 1, 0, s->rows - 1);
+        set_row(s, p0 ? p0 : 1);
         s->cx = iclamp((p1 ? p1 : 1) - 1, 0, s->cols - 1);
         break;
     case 'J': erase_display(s, p0); break;        /* ED */
@@ -552,8 +641,10 @@ static void cb_csi(void *ctx,
     }
     case 'n':                                     /* DSR — 장치 상태 보고 */
         if (p0 == 6) {                            /* CPR — 커서 위치 (1-based) */
+            /* DECOM 이면 스크롤 영역 상단이 1행이므로 상대 좌표로 보고한다. */
             char rep[32];
-            int rl = snprintf(rep, sizeof rep, "\x1b[%d;%dR", s->cy + 1, s->cx + 1);
+            int rl = snprintf(rep, sizeof rep, "\x1b[%d;%dR",
+                              s->cy - origin_row(s) + 1, s->cx + 1);
             if (rl > 0) send_reply(s, rep, (size_t)rl);
         } else if (p0 == 5) {                     /* 터미널 정상 */
             send_reply(s, "\x1b[0n", 4);
@@ -566,7 +657,7 @@ static void cb_csi(void *ctx,
             send_reply(s, "\x1b[?1;2c", strlen("\x1b[?1;2c"));       /* 1차 DA (VT100+AVO) */
         break;
     case 'd':                                     /* VPA */
-        s->cy = iclamp((p0 ? p0 : 1) - 1, 0, s->rows - 1);
+        set_row(s, p0 ? p0 : 1);
         break;
     case 'h': handle_mode(s, params, params_len, inter, 1); break;
     case 'l': handle_mode(s, params, params_len, inter, 0); break;
@@ -574,16 +665,31 @@ static void cb_csi(void *ctx,
     case 'r': {                                   /* DECSTBM */
         int top = iclamp((p0 ? p0 : 1) - 1, 0, s->rows - 1);
         int bot = iclamp((p1 ? p1 : s->rows) - 1, 0, s->rows - 1);
-        if (top < bot) { s->scroll_top = top; s->scroll_bot = bot; }
-        s->cx = 0; s->cy = 0;
+        /* 잘못된 여백(top >= bot)은 시퀀스 전체를 무시한다 (DEC 스펙). */
+        if (top < bot) {
+            s->scroll_top = top;
+            s->scroll_bot = bot;
+            /* 커서는 원점으로 — DECOM 상태에 따라 (0,0) 또는 (scroll_top,0). */
+            s->cx = 0;
+            s->cy = origin_row(s);
+        }
         break;
     }
+    case 'p':                                     /* DECRQM — CSI [?] Ps $ p */
+        if (inter && memchr(inter, '$', inter_len)) {
+            int priv = (inter[0] == '?');
+            char rep[32];
+            int rl = snprintf(rep, sizeof rep, "\x1b[%s%d;%d$y",
+                              priv ? "?" : "", p0, query_mode(s, priv, p0));
+            if (rl > 0) send_reply(s, rep, (size_t)rl);
+        }
+        break;
     case 's': /* SCOSC — 커서 저장 */
-        s->saved_cx = s->cx; s->saved_cy = s->cy;
+        s->sco_cx = s->cx; s->sco_cy = s->cy;
         break;
     case 'u': /* SCORC — 커서 복원 */
-        s->cx = iclamp(s->saved_cx, 0, s->cols - 1);
-        s->cy = iclamp(s->saved_cy, 0, s->rows - 1);
+        s->cx = iclamp(s->sco_cx, 0, s->cols - 1);
+        s->cy = iclamp(s->sco_cy, 0, s->rows - 1);
         break;
     case 'q': /* DECSCUSR — CSI Ps SP q (intermediate = space) */
         if (inter && inter[0] == ' ')
@@ -600,14 +706,20 @@ static void cb_esc(void *ctx,
 {
     screen_t *s = (screen_t*)ctx;
     (void)inter_len;
+
+    /* ESC # 8 — DECALN (화면 정렬 테스트) */
+    if (inter && inter[0] == '#') {
+        if (final == '8') align_test(s);
+        return;
+    }
+
     if (!inter || inter[0] == '\0') {
         switch (final) {
-        case '7': /* DECSC */
-            s->saved_cx = s->cx; s->saved_cy = s->cy;
+        case '7': /* DECSC — 위치 + SGR + DECOM + wrap 플래그를 화면별 슬롯에 저장 */
+            cursor_save_to(s, &s->saved[s->use_alt ? 1 : 0]);
             break;
         case '8': /* DECRC */
-            s->cx = iclamp(s->saved_cx, 0, s->cols - 1);
-            s->cy = iclamp(s->saved_cy, 0, s->rows - 1);
+            cursor_restore_from(s, &s->saved[s->use_alt ? 1 : 0]);
             break;
         case 'M': /* RI — reverse index (scroll down if at top) */
             if (s->cy == s->scroll_top)
@@ -619,12 +731,28 @@ static void cb_esc(void *ctx,
             if (s->cx >= 0 && s->cx < SCREEN_TAB_MAX) s->tab_stops[s->cx] = 1;
             break;
         case 'c': /* RIS — full reset */
+            /* 대체 화면 사용 중이면 메인 화면으로 복귀 */
+            if (s->use_alt) { s->cells = s->main_cells; s->use_alt = 0; }
             reset_sgr(s);
             s->cx = s->cy = 0;
             s->scroll_top = 0; s->scroll_bot = s->rows - 1;
+            s->origin_mode     = 0;
+            s->autowrap        = 1;
+            s->pending_wrap    = 0;
+            s->cursor_hidden   = 0;
+            s->cursor_style    = CURSOR_STYLE_DEFAULT;
+            s->mouse_mode      = SCREEN_MOUSE_NONE;
+            s->bracketed_paste = 0;
+            s->sync_output     = 0;
+            s->active_link_id  = 0;
+            s->sco_cx = s->sco_cy = 0;
             init_tab_stops(s);
             s->last_print_cp = 0;
             erase_display(s, 2);
+            /* 저장 슬롯도 초기 상태(홈 + 기본 SGR)로 되돌린다. */
+            cursor_save_to(s, &s->saved[0]);
+            s->saved[1]    = s->saved[0];
+            s->saved_1049  = s->saved[0];
             break;
         default:
             break;
@@ -774,6 +902,7 @@ int screen_init(screen_t *s, int cols, int rows, int scrollback_lines)
     s->scrollback_max = scrollback_lines;
     s->scroll_top    = 0;
     s->scroll_bot    = rows - 1;
+    s->autowrap      = 1;   /* DECAWM 는 기본 활성 */
 
     s->main_cells = calloc((size_t)rows * cols, sizeof(term_cell_t));
     s->alt_cells  = calloc((size_t)rows * cols, sizeof(term_cell_t));
@@ -822,6 +951,11 @@ int screen_init(screen_t *s, int cols, int rows, int scrollback_lines)
     vt_parser_init(&s->parser, &cbs, s);
 
     init_tab_stops(s);
+
+    /* DECSC 없이 DECRC 가 오면 '홈 + 기본 SGR' 로 복원되도록 슬롯을 채워둔다. */
+    cursor_save_to(s, &s->saved[0]);
+    s->saved[1]   = s->saved[0];
+    s->saved_1049 = s->saved[0];
 
     return 0;
 
