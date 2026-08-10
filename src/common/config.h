@@ -38,6 +38,12 @@ typedef struct {
     uint32_t cursor_color;
     uint32_t selection_background;
     uint32_t ansi[16];
+
+    /* 하단 상태바. 기존 테마 파일에 없으면 기본값이 그대로 유지된다. */
+    uint32_t statusbar_bg;
+    uint32_t statusbar_fg;
+    uint32_t statusbar_active_bg;   /* 활성 window 세그먼트 */
+    uint32_t statusbar_active_fg;
 } tessera_theme_t;
 
 /* ─── 단축키 ─────────────────────────────────────────────────────────────── */
@@ -90,6 +96,7 @@ typedef struct {
     bool           confirm_close_pane;    /* Ctrl+W 등 pane 닫기 전 확인 팝업 */
     bool           confirm_close_window;  /* window 닫기 전 확인 팝업 (다중 window 합류 시 사용) */
     bool           confirm_close_session; /* 앱/세션 종료 전 확인 팝업 */
+    bool           statusbar_show;        /* 하단 상태바 표시 (레이아웃에서 1행 예약) */
     keybindings_t  keybindings;
 } tessera_config_t;
 

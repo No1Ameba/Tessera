@@ -124,6 +124,15 @@
 - 우클릭 컨텍스트 메뉴: 고정 `180x250` → 버튼 수 × 행 높이 + 스타일 spacing 기반 동적 계산. 마우스 콜백의 하드코딩 flip 제거, 렌더 시점 clamp 로 일원화.
 - 설정창: 고정 `480x520` → 화면 비율 기반 rect + 탭 내용을 `nk_group` 스크롤로 감싸 리플로우 보장. `settings_ui_draw(..., win_w, win_h)` API 변경.
 
+### 다중 window + 하단 상태바 (2026-08-10)
+- **프로토콜 (IPC_VERSION 1 → 2)**: `SESSION_ATTACH_R` 이 window 배열(`ipc_attach_window_info_t`) + window 별 layout blob + `active_window_id` 를 싣는다. 기존엔 첫 window blob 하나만 보내 두 번째 이후 window 의 pane 이 layout 없이 고아가 됐다. 버전을 올려 구버전 데몬이 남아 있으면 헤더 magic 검사로 즉시 desync 거부(조용한 오파싱 방지).
+- **최소 크기 클램프**: PTY 는 pane 당 하나뿐이라 크기가 하나로 수렴해야 한다. `PANE_RESIZE` 를 클라이언트별 희망 크기로만 기록하고 실제 PTY 는 붙어 있는 모든 클라이언트 요청의 최소값(cols/rows 각각 독립)으로 정한다. 클라이언트 detach 시 재협상해 남은 크기로 복귀. pane 슬롯 재사용 시 이전 요청 테이블을 지운다.
+- **클라이언트 window 테이블**: `client_window_t g_windows[]` + `g_active_window`. `g_layout`/`g_active_pane`/`g_window_id` 는 활성 window 의 라이브 상태로 두고 전환 시 슬롯에 저장/복원 — 기존 100여 개 호출부 무변경. 비활성 window 의 pane 도 `pane_slot` 을 유지해 PTY 출력을 계속 받는다.
+- **단축키**: `window_next/prev/new/close` (기본 `Ctrl+Alt+l/h/n/w`) config + 설정 UI. `Ctrl+Alt+1..9,0` 번호 이동은 고정 바인딩. 닫기는 기존 `confirm_dialog(CONFIRM_KIND_WINDOW)` 재사용.
+- **상태바** (`ui/status_bar.{c,h}`): 별도 셰이더 pass 대신 **1행짜리 cell 그리드**를 만들어 기존 `gl_renderer_draw_cells()` 로 그린다(상태바는 결국 텍스트라 폰트/아틀라스 경로를 그대로 재사용). `compute_layout_rect` 가 하단 1행을 예약해 pane 과 겹치지 않고 PTY 크기도 자연히 줄어든다. 표시: 세션명 + `1:shell 2:vim* 3:logs` (활성 하이라이트, 비활성 활동 `*`) + 우측 `[SCROLL n]/[SELECT]/[REMOTE]/pane N WxH`. 폭이 좁으면 우측 블록부터 생략, 세그먼트는 잘리느니 통째로 생략.
+- **테마**: `statusbarBackground/Foreground/ActiveBackground/ActiveForeground` 4색 추가. 기존 테마 파일에 없으면 기본값 유지(하위 호환).
+- 검증: `test_status_bar` 신규 7 케이스(레이아웃/활성 하이라이트/활동 표시/상태 플래그/좁은 폭 1~60 경계 가드/우측 생략/UTF-8 디코딩), `test_ipc` 에 다중 window attach + 최소 클램프 케이스. 전체 10/10 + ASan/UBSan 클린.
+
 ### VT 완결성 (2026-08-10)
 `src/client/screen.{c,h}` 에 VT100/VT220 표준 시퀀스를 추가 구현. 파서(`vt_parser.c`)는 무변경 — 필요한 중간 바이트(`#`, `$`)를 이미 수집하고 있었다.
 - **탭 정지**: `tab_stops` 비트맵(`SCREEN_TAB_MAX=1024`, 초과 열은 8칸 폴백). HTS(ESC H) / TBC(CSI g) / HT / CHT(CSI I) / CBT(CSI Z).
@@ -211,7 +220,7 @@
       sibling fallback 으로 자연스러운 포커스 이동이 가능.
 
 ### 다중 Window / 상태바 (2026-04-22 추가)
-18. [ ] **다중 Window 관리 및 단축키**
+18. [~] **다중 Window 관리 및 단축키** — 구현 완료(2026-08-10, branch `feat/multi-window`), **GUI 수동 검증 미완**
     - 현재 구조는 session → window → pane 이지만, client 에서 window 는 사실상 1 개만
       활성 상태로 쓰고 있음. 다중 window 를 사용자가 직접 생성·전환·닫을 수 있게 한다.
     - 단축키:
@@ -231,7 +240,7 @@
     - 다중 클라이언트 환경에서 window 전환의 broadcast 정책: 클라이언트별 로컬인지 공유인지
       결정 필요 (기본은 클라이언트별 로컬이 자연스러움).
 
-19. [ ] **창 하단 상태바 UI (vim-airline 스타일)**
+19. [~] **창 하단 상태바 UI (vim-airline 스타일)** — 구현 완료(2026-08-10), **GUI 수동 검증 미완**
     - 창 맨 하단에 고정 높이의 status bar 렌더링.
     - 표시 항목 (초안):
       - 현재 session 이름 / id.

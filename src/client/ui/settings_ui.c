@@ -281,6 +281,14 @@ static void tab_window(struct nk_context *ctx, tessera_config_t *cfg)
     cfg->confirm_close_pane    = c_pane    ? true : false;
     cfg->confirm_close_window  = c_window  ? true : false;
     cfg->confirm_close_session = c_session ? true : false;
+
+    /* ── 상태바 ───────────────────────────────────────────────────────────── */
+    nk_layout_row_dynamic(ctx, 8, 1);
+    nk_spacing(ctx, 1);
+    int sb = cfg->statusbar_show ? 1 : 0;
+    nk_layout_row_dynamic(ctx, 24, 1);
+    nk_checkbox_label(ctx, "Show status bar", &sb);
+    cfg->statusbar_show = sb ? true : false;
 }
 
 static void tab_keybindings(struct nk_context *ctx, tessera_config_t *cfg)

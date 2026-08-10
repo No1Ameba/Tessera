@@ -43,6 +43,7 @@
 #include "ui/settings_ui.h"
 #include "ui/confirm_dialog.h"
 #include "ui/ui_overlay.h"
+#include "ui/status_bar.h"
 
 /* Nuklear 선언만 (NK_IMPLEMENTATION 없이) — 컨텍스트 메뉴에서 직접 사용 */
 #define NK_INCLUDE_FIXED_TYPES
@@ -85,11 +86,15 @@ typedef struct {
     char           name[64];
     layout_node_t *layout;
     uint32_t       active_pane;
+    int            activity;     /* 비활성 상태에서 새 PTY 출력을 받았으면 1 */
 } client_window_t;
 
 static client_window_t g_windows[MAX_WINDOWS];
 static int             g_window_count  = 0;
 static int             g_active_window = 0;   /* g_windows 내 인덱스 */
+
+static char           g_session_name[64] = {0};
+static const char    *g_remote_target = NULL;   /* --remote 로 붙었으면 대상 문자열 */
 
 static uint32_t       g_session_id    = 0;
 static uint32_t       g_window_id     = 0;
@@ -235,6 +240,9 @@ static void on_screen_reply(const char *bytes, size_t len, void *user)
         ipc_client_pty_input(g_client, pane_id, (const uint8_t *)bytes, len);
 }
 
+/* 비활성 window 의 pane 이면 그 window 에 활동 표시를 세운다. */
+static void mark_window_activity(uint32_t pane_id);
+
 static void on_pty_output(uint32_t pane_id, const uint8_t *data, size_t len,
                            void *user)
 {
@@ -244,11 +252,14 @@ static void on_pty_output(uint32_t pane_id, const uint8_t *data, size_t len,
         screen_feed(&s->screen, data, len);
         if (!screen_sync_output(&s->screen))
             g_dirty = 1;
+        /* 보고 있지 않은 window 의 출력은 상태바에 활동 표시(*)로 알린다. */
+        mark_window_activity(pane_id);
     }
 }
 
 static void push_layout_to_daemon(void);
 static void compute_layout_rect(int *x, int *y, int *w, int *h);
+static int  status_bar_px(void);
 
 /* 주어진 leaf 와 같은 split 의 형제 subtree 에서 첫 leaf 반환.
  * parent_pane_id 가 없을 때(세션 재접속 등)의 포커스 복귀 fallback. */
@@ -573,6 +584,7 @@ static void window_activate(int idx, int fw, int fh)
     g_window_id     = cw->id;
     g_layout        = cw->layout;
     g_active_pane   = cw->active_pane;
+    cw->activity    = 0;   /* 보고 있는 window 는 활동 표시를 지운다 */
 
     /* 활성 pane 이 유실됐으면 첫 leaf 로 되돌린다. */
     if (g_layout && !layout_find_pane(g_layout, g_active_pane)) {
@@ -588,6 +600,26 @@ static void window_activate(int idx, int fw, int fh)
         layout_each_leaf(g_layout, resize_leaf_cb, &rctx);
     }
     g_dirty = 1;
+}
+
+/* pane_id 가 속한 window 의 인덱스. 없으면 -1. */
+static int window_index_of_pane(uint32_t pane_id)
+{
+    for (int i = 0; i < g_window_count; i++) {
+        layout_node_t *root = (i == g_active_window) ? g_layout
+                                                      : g_windows[i].layout;
+        if (root && layout_find_pane(root, pane_id)) return i;
+    }
+    return -1;
+}
+
+static void mark_window_activity(uint32_t pane_id)
+{
+    int wi = window_index_of_pane(pane_id);
+    if (wi >= 0 && wi != g_active_window && !g_windows[wi].activity) {
+        g_windows[wi].activity = 1;
+        g_dirty = 1;   /* 상태바 갱신 */
+    }
 }
 
 /* 현재 window 를 저장하고 idx 번째로 전환한다. */
@@ -1089,6 +1121,7 @@ static void session_attach_setup(uint32_t sid, int cols, int rows, int fw, int f
         return;
     }
     g_session_id = sid;
+    snprintf(g_session_name, sizeof g_session_name, "%s", ar.session_name);
 
     /* 1) pane_slot 생성 — 비활성 window 의 pane 도 PTY 출력을 계속 받아야
      *    하므로 세션의 모든 pane 에 대해 만든다. */
@@ -1139,10 +1172,67 @@ static void session_attach_setup(uint32_t sid, int cols, int rows, int fw, int f
 }
 
 /* 신규 세션 생성 + 첫 pane */
+/* ── 하단 상태바 ─────────────────────────────────────────────────────────── */
+
+/*
+ * 상태바를 1행짜리 셀 그리드로 만들어 기존 cell 렌더러로 그린다.
+ * 별도 셰이더 pass 없이 폰트/아틀라스 경로를 그대로 재사용한다.
+ */
+static void render_status_bar(void)
+{
+    int bar_h = status_bar_px();
+    if (bar_h <= 0 || !g_renderer || !g_font) return;
+
+    int fw = font_cell_width(g_font);
+    if (fw < 1) return;
+    int px   = g_cfg_ptr ? g_cfg_ptr->padding_x : 0;
+    int cols = (g_win_w - 2 * px) / fw;
+    if (cols < 1) return;
+    if (cols > STATUS_BAR_MAX_COLS) cols = STATUS_BAR_MAX_COLS;
+
+    status_bar_info_t info;
+    memset(&info, 0, sizeof info);
+    info.session_name  = g_session_name[0] ? g_session_name : NULL;
+    info.active_window = g_active_window;
+    info.remote        = g_remote_target ? 1 : 0;
+    info.selecting     = (g_selecting || g_has_selection) ? 1 : 0;
+
+    int wn = g_window_count;
+    if (wn > STATUS_BAR_MAX_WINDOWS) wn = STATUS_BAR_MAX_WINDOWS;
+    for (int i = 0; i < wn; i++) {
+        info.windows[i].id       = g_windows[i].id;
+        info.windows[i].activity = g_windows[i].activity;
+        snprintf(info.windows[i].name, sizeof info.windows[i].name,
+                 "%s", g_windows[i].name);
+        int n = 0;
+        layout_node_t *root = (i == g_active_window) ? g_layout
+                                                      : g_windows[i].layout;
+        if (root) layout_each_leaf(root, count_leaf_cb, &n);
+        info.windows[i].pane_count = n;
+    }
+    info.window_count = wn;
+
+    pane_slot_t *as = pane_slot_find(g_active_pane);
+    if (as) {
+        info.active_pane_id = g_active_pane;
+        info.pane_cols      = as->screen.cols;
+        info.pane_rows      = as->screen.rows;
+        info.scrollback     = screen_scrollback_offset(&as->screen);
+    }
+
+    term_cell_t row[STATUS_BAR_MAX_COLS];
+    status_bar_build(row, cols, &info, g_theme);
+
+    pane_rect_t rect = { px, g_win_h - bar_h, cols * fw, bar_h };
+    gl_renderer_draw_cells(g_renderer, row, cols, STATUS_BAR_ROWS, rect,
+                            -1, -1, -1, -1);
+}
+
 static void session_new_setup(const char *name, int cols, int rows)
 {
     if (!name || !name[0]) name = "default";
     if (ipc_client_session_create(g_client, name, &g_session_id) != 0) return;
+    snprintf(g_session_name, sizeof g_session_name, "%s", name);
     ipc_client_window_create(g_client, g_session_id, "1", &g_window_id);
     uint32_t first_pane = 0;
     ipc_client_pane_create(g_client, g_session_id, g_window_id,
@@ -1656,13 +1746,23 @@ static void glfw_error_callback(int error, const char *description)
 /* ── Config reload ───────────────────────────────────────────────────────── */
 
 /* 현재 설정의 패딩을 반영한 레이아웃 루트 영역을 반환한다. */
+/* 상태바가 차지하는 픽셀 높이 (숨김이면 0). */
+static int status_bar_px(void)
+{
+    if (!g_cfg_ptr || !g_cfg_ptr->statusbar_show) return 0;
+    if (!g_font) return 0;
+    return font_cell_height(g_font) * STATUS_BAR_ROWS;
+}
+
 static void compute_layout_rect(int *x, int *y, int *w, int *h)
 {
     int px = g_cfg_ptr ? g_cfg_ptr->padding_x : 0;
     int py = g_cfg_ptr ? g_cfg_ptr->padding_y : 0;
     *x = px; *y = py;
     *w = g_win_w - 2 * px;
-    *h = g_win_h - 2 * py;
+    /* 하단 상태바 영역을 pane 에서 제외한다 — 겹치지 않고, PTY 크기도
+     * 자연스럽게 줄어든 높이로 협상된다. */
+    *h = g_win_h - 2 * py - status_bar_px();
     if (*w < 1) *w = 1;
     if (*h < 1) *h = 1;
 }
@@ -1773,7 +1873,7 @@ int main(int argc, char *argv[])
     const char *import_path    = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--remote") == 0 && i + 1 < argc)
-            remote_target = argv[++i];
+            remote_target = g_remote_target = argv[++i];
         else if (strcmp(argv[i], "--attach") == 0 && i + 1 < argc)
             attach_name = argv[++i];
         else if (strcmp(argv[i], "--export") == 0 && i + 2 < argc) {
@@ -2111,6 +2211,8 @@ int main(int argc, char *argv[])
                     render_ctx_t rctx = { g_renderer, g_font, blink_on };
                     layout_each_leaf(g_layout, render_leaf_cb, &rctx);
                 }
+
+                render_status_bar();
 
                 /* Nuklear UI — 항상 렌더링 (메뉴 버튼 상시 표시) */
                 if (g_nk_ctx) {
