@@ -1219,6 +1219,11 @@ static void pty_output_read(ipc_server_t *srv, int pty_fd) {
         pane_t    *p = w ? pane_find_by_id(w, slot->pane_id)    : NULL;
         if (p) pane_destroy(w, p);
 
+        /* window 의 마지막 pane 이었으면 빈 window 도 제거한다.
+         * 남겨두면 window_count 와 스냅샷에 빈 window 가 쌓인다. */
+        if (w && w->pane_count == 0 && s && s->window_count > 0)
+            window_destroy(s, w);
+
         /* 세션의 마지막 pane 이었으면 세션 자체도 제거 (useless empty session 방지) */
         if (s) session_destroy_if_empty(srv, s);
     }

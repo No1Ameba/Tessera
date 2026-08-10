@@ -99,6 +99,23 @@ static int client_recv(int fd, ipc_msg_header_t *out_hdr,
     return 0;
 }
 
+/*
+ * 원하는 타입의 메시지가 올 때까지 읽는다.
+ * 데몬은 PANE_EXITED 같은 브로드캐스트를 응답 사이에 끼워 보낼 수 있으므로,
+ * 단순 client_recv 로는 엉뚱한 메시지를 응답으로 오인한다.
+ */
+static int client_recv_type(int fd, ipc_msg_type_t want,
+                             ipc_msg_header_t *out_hdr,
+                             uint8_t *out_payload, size_t payload_max,
+                             int timeout_ms) {
+    for (int i = 0; i < 32; i++) {
+        if (client_recv(fd, out_hdr, out_payload, payload_max, timeout_ms) < 0)
+            return -1;
+        if (out_hdr->type == (uint32_t)want) return 0;
+    }
+    return -1;
+}
+
 /* ─── 서버 스레드 ────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -553,6 +570,86 @@ static void test_pane_size_min_clamp(void) {
     session_manager_destroy(&mgr);
 }
 
+/*
+ * 셸이 exit 하면 pane 이 사라지고, 그 window 의 마지막 pane 이었으면 빈
+ * window 도 함께 없어져야 한다. 남겨두면 window_count 와 스냅샷에 빈
+ * window 가 쌓이고, 클라이언트는 그 window 를 열 수 없다.
+ */
+static void test_empty_window_removed(void) {
+    GROUP("PTY EOF — 빈 window 자동 제거");
+
+    session_manager_t mgr;
+    session_manager_init(&mgr);
+
+    pthread_t tid;
+    server_ctx_t ctx;
+    ipc_server_t *srv = start_test_server(&mgr, &tid, &ctx);
+    ASSERT(srv != NULL, "서버 시작");
+    if (!srv) return;
+
+    char path[IPC_SOCKET_PATH_MAX];
+    ipc_socket_path(path, sizeof(path));
+    int cfd = connect_to(path);
+    ASSERT(cfd >= 0, "연결");
+
+    ipc_msg_header_t hdr;
+    uint8_t buf[512];
+
+    ipc_payload_session_create_t sreq;
+    memset(&sreq, 0, sizeof(sreq));
+    strncpy(sreq.name, "wclose", sizeof(sreq.name) - 1);
+    client_send(cfd, IPC_MSG_SESSION_CREATE, &sreq, sizeof(sreq));
+    client_recv(cfd, &hdr, buf, sizeof(buf), 1000);
+    uint32_t sid = ((ipc_payload_session_created_t *)buf)->session_id;
+
+    /* window 2개 — 하나는 남아야 세션이 유지된다 */
+    uint32_t w1 = make_window(cfd, sid, "one");
+    uint32_t w2 = make_window(cfd, sid, "two");
+    uint32_t p1 = make_pane(cfd, sid, w1, 80, 24);
+    uint32_t p2 = make_pane(cfd, sid, w2, 80, 24);
+    ASSERT(p1 > 0 && p2 > 0, "각 window 에 pane 생성");
+
+    session_t *s = session_find_by_id(&mgr, sid);
+    ASSERT(s && s->window_count == 2, "window 2개 확인");
+
+    /* w2 의 셸을 종료시킨다 → PTY EOF */
+    ipc_payload_pty_data_t in;
+    memset(&in, 0, sizeof(in));
+    in.pane_id  = p2;
+    in.data_len = 5;
+    uint8_t msg[sizeof(in) + 5];
+    memcpy(msg, &in, sizeof(in));
+    memcpy(msg + sizeof(in), "exit\n", 5);
+    client_send(cfd, IPC_MSG_PTY_INPUT, msg, (uint16_t)sizeof(msg));
+
+    /* EOF 처리를 기다린다 */
+    for (int i = 0; i < 60 && s->window_count > 1; i++) usleep(50 * 1000);
+
+    ASSERT(s->window_count == 1, "빈 window 가 제거됨");
+    ASSERT(window_find_by_id(s, w2) == NULL, "종료된 window 는 조회 불가");
+    ASSERT(window_find_by_id(s, w1) != NULL, "남은 window 는 유지");
+
+    /* attach 하면 살아있는 window 만 온다 */
+    ipc_payload_session_attach_t areq = { .session_id = sid };
+    uint8_t abuf[IPC_MAX_PAYLOAD_LEN];
+    client_send(cfd, IPC_MSG_SESSION_ATTACH, &areq, sizeof(areq));
+    if (client_recv_type(cfd, IPC_MSG_SESSION_ATTACH_R, &hdr,
+                         abuf, sizeof(abuf), 1000) == 0) {
+        const ipc_payload_session_attach_r_t *resp =
+            (const ipc_payload_session_attach_r_t *)abuf;
+        ASSERT(resp->window_count == 1, "ATTACH_R 도 window 1개만 보고");
+        ASSERT(resp->pane_count == 1,   "ATTACH_R pane 1개");
+    } else {
+        ASSERT(0, "ATTACH_R 수신");
+    }
+
+    close(cfd);
+    ipc_server_shutdown(srv);
+    pthread_join(tid, NULL);
+    ipc_server_destroy(srv);
+    session_manager_destroy(&mgr);
+}
+
 static void test_pty_io(void) {
     GROUP("PTY_INPUT → PTY_OUTPUT");
 
@@ -694,6 +791,7 @@ int main(void) {
     test_window_pane_create();
     test_attach_multi_window();
     test_pane_size_min_clamp();
+    test_empty_window_removed();
     test_pty_io();
     test_error_handling();
 
