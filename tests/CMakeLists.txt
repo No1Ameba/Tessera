@@ -7,7 +7,7 @@ target_link_libraries(test_utf8 PRIVATE termemu_common)
 add_test(NAME utf8 COMMAND test_utf8)
 
 add_executable(test_config test_config.c)
-target_link_libraries(test_config PRIVATE termemu_common PkgConfig::CJSON)
+target_link_libraries(test_config PRIVATE termemu_common termemu_cjson)
 add_test(NAME config COMMAND test_config)
 
 add_executable(test_session test_session.c)
@@ -37,7 +37,7 @@ target_include_directories(test_font PRIVATE
     ${CMAKE_SOURCE_DIR}/src/client)
 target_link_libraries(test_font PRIVATE
     Freetype::Freetype
-    PkgConfig::HARFBUZZ)
+    termemu_harfbuzz)
 add_test(NAME font COMMAND test_font)
 
 add_executable(test_screen test_screen.c

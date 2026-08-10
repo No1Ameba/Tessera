@@ -11,5 +11,5 @@ target_include_directories(termemu_common
 )
 
 target_link_libraries(termemu_common
-    PRIVATE PkgConfig::CJSON
+    PRIVATE termemu_cjson
 )

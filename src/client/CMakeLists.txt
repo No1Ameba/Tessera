@@ -36,7 +36,7 @@ if(TERMEMU_BUILD_APPS)
         PRIVATE glfw
         PRIVATE OpenGL::GL
         PRIVATE Freetype::Freetype
-        PRIVATE PkgConfig::HARFBUZZ
+        PRIVATE termemu_harfbuzz
     )
 
     install(TARGETS termemu RUNTIME DESTINATION bin)

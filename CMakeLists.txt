@@ -35,12 +35,35 @@ endif()
 # 시스템 의존성 (apt / brew 로 설치)
 # -----------------------------------------------------------------------------
 find_package(Threads REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(CJSON REQUIRED IMPORTED_TARGET libcjson)  # apt: libcjson-dev | brew: cjson
 
-# 렌더링 의존성: 테스트(test_font)에서도 필요하므로 항상 탐색
-find_package(Freetype REQUIRED)         # apt: libfreetype6-dev  | brew: freetype
-pkg_check_modules(HARFBUZZ REQUIRED IMPORTED_TARGET harfbuzz) # apt: libharfbuzz-dev | brew: harfbuzz
+# 의존성 탐지: Linux/macOS 는 pkg-config, Windows(vcpkg)는 CMake config 패키지를
+# 쓴다. 어느 경로로 찾든 나머지 빌드는 아래 일관된 INTERFACE 타깃으로만 링크한다
+# (termemu_cjson / termemu_harfbuzz / Freetype::Freetype) — 탐지 방식과 분리.
+add_library(termemu_cjson    INTERFACE)
+add_library(termemu_harfbuzz INTERFACE)
+
+if(WIN32)
+    # vcpkg: `vcpkg install cjson harfbuzz freetype` + -DCMAKE_TOOLCHAIN_FILE=…
+    # (타깃명은 포트 버전에 따라 다를 수 있어 Windows CI 에서 최종 검증 필요.)
+    find_package(cJSON CONFIG REQUIRED)
+    if(TARGET cjson::cjson)
+        target_link_libraries(termemu_cjson INTERFACE cjson::cjson)
+    else()
+        target_link_libraries(termemu_cjson INTERFACE cjson)
+    endif()
+    find_package(harfbuzz CONFIG REQUIRED)
+    target_link_libraries(termemu_harfbuzz INTERFACE harfbuzz::harfbuzz)
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(CJSON    REQUIRED IMPORTED_TARGET libcjson)  # apt: libcjson-dev | brew: cjson
+    pkg_check_modules(HARFBUZZ REQUIRED IMPORTED_TARGET harfbuzz)  # apt: libharfbuzz-dev | brew: harfbuzz
+    target_link_libraries(termemu_cjson    INTERFACE PkgConfig::CJSON)
+    target_link_libraries(termemu_harfbuzz INTERFACE PkgConfig::HARFBUZZ)
+endif()
+
+# 렌더링 의존성(테스트 test_font 에서도 필요하므로 항상 탐색).
+# FreeType 은 표준 CMake 모듈 + vcpkg 모두 Freetype::Freetype 타깃을 제공.
+find_package(Freetype REQUIRED)         # apt: libfreetype6-dev | brew: freetype | vcpkg: freetype
 
 # -----------------------------------------------------------------------------
 # Vendored: glad (OpenGL 3.3 Core, MIT) — 클라이언트 빌드 시에만 필요
