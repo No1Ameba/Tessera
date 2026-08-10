@@ -1,5 +1,5 @@
-#ifndef TERMEMU_FONT_RESOLVE_H
-#define TERMEMU_FONT_RESOLVE_H
+#ifndef TESSERA_FONT_RESOLVE_H
+#define TESSERA_FONT_RESOLVE_H
 
 #include <stddef.h>
 #include "renderer/font.h"
@@ -18,4 +18,4 @@ const char *resolve_font_path(const char *name, char *buf, size_t bufsz);
  */
 void add_cjk_fallbacks(font_face_t *font, const char *primary_path);
 
-#endif /* TERMEMU_FONT_RESOLVE_H */
+#endif /* TESSERA_FONT_RESOLVE_H */

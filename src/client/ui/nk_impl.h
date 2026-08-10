@@ -1,5 +1,5 @@
-#ifndef TERMEMU_NK_IMPL_H
-#define TERMEMU_NK_IMPL_H
+#ifndef TESSERA_NK_IMPL_H
+#define TESSERA_NK_IMPL_H
 
 /*
  * Nuklear GLFW + OpenGL 3.3 Core 백엔드
@@ -58,4 +58,4 @@ void nk_impl_reset_input(void);
  */
 void nk_impl_shutdown(void);
 
-#endif /* TERMEMU_NK_IMPL_H */
+#endif /* TESSERA_NK_IMPL_H */

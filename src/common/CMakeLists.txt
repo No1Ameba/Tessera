@@ -1,4 +1,4 @@
-add_library(termemu_common STATIC
+add_library(tessera_common STATIC
     vt_parser.c
     config.c
     theme_presets.c
@@ -6,10 +6,10 @@ add_library(termemu_common STATIC
     session_file.c
 )
 
-target_include_directories(termemu_common
+target_include_directories(tessera_common
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(termemu_common
-    PRIVATE termemu_cjson
+target_link_libraries(tessera_common
+    PRIVATE tessera_cjson
 )

@@ -1,5 +1,5 @@
-#ifndef TERMEMU_GL_RENDERER_H
-#define TERMEMU_GL_RENDERER_H
+#ifndef TESSERA_GL_RENDERER_H
+#define TESSERA_GL_RENDERER_H
 
 /*
  * OpenGL 3.3 Core cell renderer.
@@ -71,4 +71,4 @@ void gl_renderer_draw_cursor(gl_renderer_t *r,
                               float fg_r, float fg_g, float fg_b,
                               pane_rect_t pane);
 
-#endif /* TERMEMU_GL_RENDERER_H */
+#endif /* TESSERA_GL_RENDERER_H */

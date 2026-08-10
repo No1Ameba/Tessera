@@ -10,7 +10,7 @@
  *    evloop_wait(GetQueuedCompletionStatus)에서 완료를 EV_READ readiness 로 변환해
  *    호출자(ipc_server.c)에게 넘겨야 한다. 난제: 핸들↔fd 매핑, per-connection
  *    OVERLAPPED + 부분 읽기 버퍼, 파이프 broken → EV_HANGUP 매핑, 그리고 ipc.h
- *    (Named Pipe)·termemu_pty.h(ConPTY) 의 HANDLE↔fd 브릿지 통일.
+ *    (Named Pipe)·tessera_pty.h(ConPTY) 의 HANDLE↔fd 브릿지 통일.
  *
  * 현재는 심볼만 제공하는 실패 스텁이다(플랫폼 라이브러리 링크용). 데몬 실행 파일은
  * 아직 Windows 빌드 대상이 아니다.

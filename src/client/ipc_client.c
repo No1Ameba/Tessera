@@ -199,10 +199,10 @@ static int spawn_daemon(void)
             /* 1: same dir */
             size_t dir_len = (size_t)(slash - exe + 1);
             snprintf(candidate1, sizeof candidate1,
-                     "%.*stermemu-daemon", (int)dir_len, exe);
+                     "%.*stessera-daemon", (int)dir_len, exe);
             /* 2: ../daemon/ */
             snprintf(candidate2, sizeof candidate2,
-                     "%.*s../daemon/termemu-daemon", (int)dir_len, exe);
+                     "%.*s../daemon/tessera-daemon", (int)dir_len, exe);
         }
     }
 
@@ -216,9 +216,9 @@ static int spawn_daemon(void)
             dup2(devnull, 0); dup2(devnull, 1); dup2(devnull, 2);
             close(devnull);
         }
-        if (candidate1[0]) execl(candidate1, "termemu-daemon", "--daemon", (char*)NULL);
-        if (candidate2[0]) execl(candidate2, "termemu-daemon", "--daemon", (char*)NULL);
-        execlp("termemu-daemon", "termemu-daemon", "--daemon", (char*)NULL);
+        if (candidate1[0]) execl(candidate1, "tessera-daemon", "--daemon", (char*)NULL);
+        if (candidate2[0]) execl(candidate2, "tessera-daemon", "--daemon", (char*)NULL);
+        execlp("tessera-daemon", "tessera-daemon", "--daemon", (char*)NULL);
         _exit(1);
     }
 
@@ -572,7 +572,7 @@ int ipc_client_connect_remote(ipc_client_t *c, const char *ssh_target)
         close(to_child[0]);
         close(from_child[1]);
         execlp("ssh", "ssh", "-T",
-               ssh_target, "termemu-bridge", (char *)NULL);
+               ssh_target, "tessera-bridge", (char *)NULL);
         /* exec 실패 시 stderr에 출력 */
         perror("exec ssh");
         _exit(1);
@@ -604,8 +604,8 @@ int ipc_client_connect_remote(ipc_client_t *c, const char *ssh_target)
                     15000) < 0) {  /* 15초 — SSH 키 교환 시간 포함 */
         fprintf(stderr, "[remote] HELLO_ACK timeout — check:\n"
                         "  1. SSH key auth to '%s' works (ssh %s echo ok)\n"
-                        "  2. termemu-bridge is installed on remote\n"
-                        "  3. termemu-daemon is running on remote\n",
+                        "  2. tessera-bridge is installed on remote\n"
+                        "  3. tessera-daemon is running on remote\n",
                 ssh_target, ssh_target);
         /* SSH 자식 프로세스 정리 */
         kill(pid, SIGTERM);
@@ -688,7 +688,7 @@ int ipc_client_session_save(ipc_client_t *c, uint32_t session_id,
 
     /* JSON을 임시 파일에 쓰고 session_snapshot_load로 파싱 */
     char tmp_path[64];
-    snprintf(tmp_path, sizeof tmp_path, "/tmp/termemu-snap-cli-%d.json", (int)getpid());
+    snprintf(tmp_path, sizeof tmp_path, "/tmp/tessera-snap-cli-%d.json", (int)getpid());
     FILE *fp = fopen(tmp_path, "w");
     if (!fp) return -1;
     fputs((const char *)json_buf, fp);

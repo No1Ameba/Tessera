@@ -1,5 +1,5 @@
-#ifndef TERMEMU_IPC_PROTO_H
-#define TERMEMU_IPC_PROTO_H
+#ifndef TESSERA_IPC_PROTO_H
+#define TESSERA_IPC_PROTO_H
 
 /*
  * IPC 프로토콜 — 데몬↔클라이언트 바이너리 메시지 포맷
@@ -275,14 +275,14 @@ typedef struct {
 
 /* ─── 소켓 경로 ──────────────────────────────────────────────────────────── */
 
-/* POSIX 소켓 경로: $XDG_RUNTIME_DIR/termemu-<uid>.sock 우선, 없으면 아래 /tmp
+/* POSIX 소켓 경로: $XDG_RUNTIME_DIR/tessera-<uid>.sock 우선, 없으면 아래 /tmp
  * 폴백 포맷 사용 (ipc_socket_path() 참조). MAX 는 sockaddr_un.sun_path(108) 에
  * 맞춰 XDG_RUNTIME_DIR 이 길어도 여유를 둔다. */
-#define IPC_SOCKET_PATH_FMT  "/tmp/termemu-%u.sock"
+#define IPC_SOCKET_PATH_FMT  "/tmp/tessera-%u.sock"
 #define IPC_SOCKET_PATH_MAX  108
 
-/* Windows: \\.\pipe\termemu-<username> */
-#define IPC_PIPE_NAME_FMT    "\\\\.\\pipe\\termemu-%s"
+/* Windows: \\.\pipe\tessera-<username> */
+#define IPC_PIPE_NAME_FMT    "\\\\.\\pipe\\tessera-%s"
 #define IPC_PIPE_NAME_MAX    128
 
 /* ─── 크기 제약 ──────────────────────────────────────────────────────────── */
@@ -293,4 +293,4 @@ typedef struct {
 /* PTY 데이터 단위 최대 크기 (read() 호출 버퍼) */
 #define IPC_PTY_CHUNK_MAX    4096
 
-#endif /* TERMEMU_IPC_PROTO_H */
+#endif /* TESSERA_IPC_PROTO_H */

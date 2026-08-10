@@ -57,11 +57,11 @@
 16. ✅ `cell.h` — `term_cell_t` / `pane_rect_t` 공유 정의 (GL 분리)
 17. ✅ `screen` — VT 파서 → cell grid (SGR/CSI/ESC/스크롤백/대체화면) (15 TC)
 
-### Phase 7 — 통합 빌드 (`TERMEMU_BUILD_APPS=ON`)
+### Phase 7 — 통합 빌드 (`TESSERA_BUILD_APPS=ON`)
 - ✅ `fs_watch_posix.c` stub 채움 (빈 TU 에러 수정)
 - ✅ `ipc_client.c` — `fcntl.h`, `sys/un.h` 누락 추가
 - ✅ `src/client/CMakeLists.txt` — `screen.c` 소스 추가
-- ✅ `termemu-daemon` (103KB) + `termemu` (235KB) 링크 성공
+- ✅ `tessera-daemon` (103KB) + `tessera` (235KB) 링크 성공
 - ✅ 9/9 기존 테스트 여전히 통과
 
 ### Phase 6 — MVP 완성 (VT 1단계 나머지)
@@ -87,7 +87,7 @@
 - 타임아웃 · autosave 주기는 config 로 튜닝 (`daemon.session_idle_timeout`, `daemon.autosave_interval`).
 
 ### 크래시 복구 (2026-04-19)
-- 세션 스냅샷을 `~/.config/termemu/sessions/*.json` 에 주기 저장 (cJSON).
+- 세션 스냅샷을 `~/.config/tessera/sessions/*.json` 에 주기 저장 (cJSON).
 - 데몬 시작 시 `ipc_server_restore_sessions()` 가 스냅샷 스캔 → 세션·window·layout blob 복원.
 - `save_all_sessions()` 를 autosave / 종료 시 공통 호출, destroy 경로에서 snapshot 삭제.
 
@@ -108,7 +108,7 @@
 - 파괴적 동작(`do_close_pane` / 마지막 pane → 세션 종료 / X 버튼 창 닫기) 에 Nuklear 모달 팝업 삽입.
 - `src/client/ui/confirm_dialog.{c,h}` — 싱글톤 모달. Cancel/Close 버튼 + "Don't ask again" 체크박스 +
   Esc/Enter = 취소 (기본 포커스 Cancel). 승인 시 콜백 호출.
-- `termemu_config_t` 에 `confirm_close_pane` / `confirm_close_window` / `confirm_close_session` bool 추가
+- `tessera_config_t` 에 `confirm_close_pane` / `confirm_close_window` / `confirm_close_session` bool 추가
   (기본 true). JSON key: `confirm.{pane,window,session}`.
 - `glfwSetWindowCloseCallback` 으로 X 버튼 가로채 세션 확인으로 분기. 피커 취소 등 세션 생성 이전 단계는
   곧바로 종료.
@@ -132,12 +132,12 @@
 2. [x] **OSC 52 클립보드:** 터미널 앱(vim 등)에서 클립보드 읽기/쓰기 ✅
 3. [x] **Synchronized Output:** `?2026h` — 빠른 출력 시 깜빡임 제거 ✅
 4. [x] **설정 핫 리로드:** inotify로 config.json 변경 감지 → 자동 적용 ✅
-5. [x] **원격 세션 동기화:** SSH 터널 통한 원격 daemon attach (termemu-bridge + PTY 링 버퍼) ✅
-6. [~] **Windows 백엔드:** leaf 구현 착수(branch `feat/windows-backend`, 2026-08-07, **MSVC 미검증**) — `pty_win.c`(ConPTY, PeekNamedPipe 논블로킹 read), `fs_watch_win.c`(ReadDirectoryChangesW, 완성도 높음), `ipc_win.c`(Named Pipe, 골격/placeholder). `termemu_pty.h` 를 `_WIN32` 조건부로 이식성 확보(ssize_t/pty_t). **데몬 이벤트 루프 추상화 완료**(branch `refactor/daemon-eventloop`, 2026-08-10): raw epoll → `platform/event_loop.{h}` 인터페이스(POSIX epoll / Windows IOCP 스켈레톤). `ipc_server.c` 는 `evloop_*` 만 사용, 리눅스 빌드+test_ipc+ASan 통과. → Windows 데몬 블로커가 "`event_loop_win.c` IOCP 어댑터 구현"으로 축소. 검증 경로: Windows CI 잡(#10).
+5. [x] **원격 세션 동기화:** SSH 터널 통한 원격 daemon attach (tessera-bridge + PTY 링 버퍼) ✅
+6. [~] **Windows 백엔드:** leaf 구현 착수(branch `feat/windows-backend`, 2026-08-07, **MSVC 미검증**) — `pty_win.c`(ConPTY, PeekNamedPipe 논블로킹 read), `fs_watch_win.c`(ReadDirectoryChangesW, 완성도 높음), `ipc_win.c`(Named Pipe, 골격/placeholder). `tessera_pty.h` 를 `_WIN32` 조건부로 이식성 확보(ssize_t/pty_t). **데몬 이벤트 루프 추상화 완료**(branch `refactor/daemon-eventloop`, 2026-08-10): raw epoll → `platform/event_loop.{h}` 인터페이스(POSIX epoll / Windows IOCP 스켈레톤). `ipc_server.c` 는 `evloop_*` 만 사용, 리눅스 빌드+test_ipc+ASan 통과. → Windows 데몬 블로커가 "`event_loop_win.c` IOCP 어댑터 구현"으로 축소. 검증 경로: Windows CI 잡(#10).
 7. [x] **OSC 8 하이퍼링크:** 클릭 가능한 URL ✅
 8. [ ] **Kitty Image Protocol:** 이미지 인라인 표시
 9. [x] **크래시 복구:** 데몬 상태 저장/복원 ✅
-10. [~] **CI 파이프라인:** GitHub Actions `.github/workflows/ci.yml` — Linux/macOS 전체 빌드+테스트 + **Windows 잡(`build-windows`, 2026-08-07 추가)**: MSVC `cl /c` 로 platform leaf 3종(ConPTY/NamedPipe/ReadDirectoryChangesW) 컴파일 체크(데몬 IOCP 포팅 전까지 전체 빌드는 불가하므로 leaf 컴파일만 검증). 남은 것: ASan/UBSan 잡(`-DTERMEMU_SANITIZE=ON`), 데몬 포팅 후 Windows 전체 빌드.
+10. [~] **CI 파이프라인:** GitHub Actions `.github/workflows/ci.yml` — Linux/macOS 전체 빌드+테스트 + **Windows 잡(`build-windows`, 2026-08-07 추가)**: MSVC `cl /c` 로 platform leaf 3종(ConPTY/NamedPipe/ReadDirectoryChangesW) 컴파일 체크(데몬 IOCP 포팅 전까지 전체 빌드는 불가하므로 leaf 컴파일만 검증). 남은 것: ASan/UBSan 잡(`-DTESSERA_SANITIZE=ON`), 데몬 포팅 후 Windows 전체 빌드.
 11. [ ] **Kitty Keyboard Protocol:** 정밀 키 입력 (vim 미지원, 최하 우선순위)
 
 ---
@@ -268,7 +268,7 @@
 cmake -B build -G Ninja && cmake --build build && ctest --test-dir build
 
 # 앱(daemon/client)까지 빌드할 때 (미구현 모듈 완성 후)
-cmake -B build -G Ninja -DTERMEMU_BUILD_APPS=ON && cmake --build build
+cmake -B build -G Ninja -DTESSERA_BUILD_APPS=ON && cmake --build build
 ```
 
 ### 단독 gcc 빌드 (cmake 없이 빠르게 확인)

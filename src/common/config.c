@@ -30,7 +30,7 @@ uint32_t color_parse_hex(const char *hex, uint32_t fallback) {
  * 기본 테마: VS Code Dark+ 계열 색상.
  * 별도 테마 파일이 없어도 동작 가능하도록.
  */
-void theme_defaults(termemu_theme_t *t) {
+void theme_defaults(tessera_theme_t *t) {
     memset(t, 0, sizeof(*t));
     strncpy(t->name, "default", sizeof(t->name) - 1);
 
@@ -61,7 +61,7 @@ static const char *ANSI_KEYS[16] = {
     "brightBlue",   "brightPurple","brightCyan",   "brightWhite",
 };
 
-bool theme_load_string(const char *json, termemu_theme_t *t) {
+bool theme_load_string(const char *json, tessera_theme_t *t) {
     if (!json || !t) return false;
 
     cJSON *root = cJSON_Parse(json);
@@ -97,7 +97,7 @@ bool theme_load_string(const char *json, termemu_theme_t *t) {
     return true;
 }
 
-bool theme_save_file(const char *path, const termemu_theme_t *t) {
+bool theme_save_file(const char *path, const tessera_theme_t *t) {
     if (!path || !t) return false;
 
     cJSON *root = cJSON_CreateObject();
@@ -130,7 +130,7 @@ bool theme_save_file(const char *path, const termemu_theme_t *t) {
     return true;
 }
 
-bool theme_load_file(const char *path, termemu_theme_t *t) {
+bool theme_load_file(const char *path, tessera_theme_t *t) {
     if (!path || !t) return false;
 
     FILE *f = fopen(path, "rb");
@@ -157,7 +157,7 @@ bool theme_load_file(const char *path, termemu_theme_t *t) {
 
 /* ─── 설정 기본값 ────────────────────────────────────────────────────────── */
 
-void config_defaults(termemu_config_t *cfg) {
+void config_defaults(tessera_config_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
     strncpy(cfg->font_family, "monospace", sizeof(cfg->font_family) - 1);
     cfg->font_size        = 14.0f;
@@ -206,7 +206,7 @@ static cursor_style_t parse_cursor_style(const char *s) {
     return CURSOR_BLOCK;
 }
 
-bool config_load_string(const char *json, termemu_config_t *cfg) {
+bool config_load_string(const char *json, tessera_config_t *cfg) {
     if (!json || !cfg) return false;
 
     cJSON *root = cJSON_Parse(json);
@@ -345,7 +345,7 @@ bool config_load_string(const char *json, termemu_config_t *cfg) {
 
 /* ─── 설정 저장 ─────────────────────────────────────────────────────────── */
 
-bool config_save_file(const char *path, const termemu_config_t *cfg) {
+bool config_save_file(const char *path, const tessera_config_t *cfg) {
     if (!path || !cfg) return false;
 
     cJSON *root = cJSON_CreateObject();
@@ -432,7 +432,7 @@ bool config_save_file(const char *path, const termemu_config_t *cfg) {
     return true;
 }
 
-bool config_load_file(const char *path, termemu_config_t *cfg) {
+bool config_load_file(const char *path, tessera_config_t *cfg) {
     if (!path || !cfg) return false;
 
     FILE *f = fopen(path, "rb");

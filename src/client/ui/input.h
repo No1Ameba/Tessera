@@ -1,5 +1,5 @@
-#ifndef TERMEMU_INPUT_H
-#define TERMEMU_INPUT_H
+#ifndef TESSERA_INPUT_H
+#define TESSERA_INPUT_H
 
 /*
  * Input translation — GLFW key/modifier → VT/ANSI escape sequences.
@@ -67,4 +67,4 @@ int input_mouse_to_bytes(int col, int row, int button, int press,
                           unsigned int modifiers,
                           uint8_t *out_buf, int buf_size);
 
-#endif /* TERMEMU_INPUT_H */
+#endif /* TESSERA_INPUT_H */

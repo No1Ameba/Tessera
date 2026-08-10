@@ -134,7 +134,7 @@ static void test_socket_path(void) {
     int ret = ipc_socket_path(buf, sizeof(buf));
     ASSERT(ret == 0,        "path 생성 성공");
     ASSERT(buf[0] == '/',   "절대 경로");
-    ASSERT(strstr(buf, "termemu") != NULL, "경로에 'termemu' 포함");
+    ASSERT(strstr(buf, "tessera") != NULL, "경로에 'tessera' 포함");
 
     char small[4];
     ret = ipc_socket_path(small, sizeof(small));
@@ -145,7 +145,7 @@ static void test_listen_accept(void) {
     GROUP("listen / connect / accept");
 
     char path[IPC_SOCKET_PATH_MAX];
-    snprintf(path, sizeof(path), "/tmp/termemu_test_%d.sock", (int)getpid());
+    snprintf(path, sizeof(path), "/tmp/tessera_test_%d.sock", (int)getpid());
 
     int lfd = ipc_listen_socket(path);
     ASSERT(lfd >= 0, "listen_socket 성공");

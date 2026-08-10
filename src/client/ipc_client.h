@@ -1,8 +1,8 @@
-#ifndef TERMEMU_IPC_CLIENT_H
-#define TERMEMU_IPC_CLIENT_H
+#ifndef TESSERA_IPC_CLIENT_H
+#define TESSERA_IPC_CLIENT_H
 
 /*
- * IPC client — connects to the termemu daemon over a Unix domain socket.
+ * IPC client — connects to the tessera daemon over a Unix domain socket.
  *
  * On-demand spawn:
  *   ipc_client_connect() tries to connect to the daemon socket. If the socket
@@ -56,7 +56,7 @@ int  ipc_client_connect(ipc_client_t *c);
 /*
  * SSH를 통해 원격 daemon에 연결한다.
  * ssh_target: "user@host" 형태.
- * 원격에 termemu-bridge가 설치되어 있어야 한다.
+ * 원격에 tessera-bridge가 설치되어 있어야 한다.
  * @return 0 success, -1 failure.
  */
 int  ipc_client_connect_remote(ipc_client_t *c, const char *ssh_target);
@@ -150,4 +150,4 @@ int ipc_client_pty_input(ipc_client_t *c, uint32_t pane_id,
  */
 int ipc_client_poll(ipc_client_t *c, int timeout_ms);
 
-#endif /* TERMEMU_IPC_CLIENT_H */
+#endif /* TESSERA_IPC_CLIENT_H */

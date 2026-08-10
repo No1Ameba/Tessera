@@ -1,5 +1,5 @@
-#ifndef TERMEMU_CELL_H
-#define TERMEMU_CELL_H
+#ifndef TESSERA_CELL_H
+#define TESSERA_CELL_H
 
 /*
  * Terminal cell — shared between screen buffer and GL renderer.
@@ -39,4 +39,4 @@ typedef struct { int x, y, w, h; } pane_rect_t;
 #define CELL_DEFAULT_BG_G  20
 #define CELL_DEFAULT_BG_B  20
 
-#endif /* TERMEMU_CELL_H */
+#endif /* TESSERA_CELL_H */

@@ -1,12 +1,12 @@
-# termemu 사용 가이드
+# tessera 사용 가이드
 
 ## 목차
 
 1. [요구 사항](#1-요구-사항)
 2. [빌드](#2-빌드)
 3. [실행 구조](#3-실행-구조)
-4. [termemu-daemon](#4-termemu-daemon)
-5. [termemu (클라이언트)](#5-termemu-클라이언트)
+4. [tessera-daemon](#4-tessera-daemon)
+5. [tessera (클라이언트)](#5-tessera-클라이언트)
 6. [단축키 & 마우스](#6-단축키--마우스)
 7. [설정 파일](#7-설정-파일)
 8. [테마](#8-테마)
@@ -62,15 +62,15 @@ ctest --test-dir build        # 9개 테스트 실행
 ### 전체 빌드 (데몬 + 클라이언트 포함)
 
 ```bash
-cmake -B build -G Ninja -DTERMEMU_BUILD_APPS=ON
+cmake -B build -G Ninja -DTESSERA_BUILD_APPS=ON
 cmake --build build
 ```
 
 빌드 결과물:
 
 ```
-build/src/daemon/termemu-daemon   # 백그라운드 세션 관리 데몬
-build/src/client/termemu          # 터미널 클라이언트
+build/src/daemon/tessera-daemon   # 백그라운드 세션 관리 데몬
+build/src/client/tessera          # 터미널 클라이언트
 ```
 
 ### 설치 (선택)
@@ -85,47 +85,47 @@ sudo cmake --install build --prefix /usr/local
 
 ```
 ┌──────────────────────────────────────────┐
-│  termemu (클라이언트, GLFW 창)            │
+│  tessera (클라이언트, GLFW 창)            │
 │  - 키 입력 → IPC → 데몬                  │
 │  - PTY 출력 ← IPC ← 데몬                 │
 │  - VT 파싱 → 셀 그리드 → OpenGL 렌더링   │
 │  - Nuklear 설정 오버레이                  │
 └────────────────┬─────────────────────────┘
                  │  Unix Domain Socket
-                 │  /tmp/termemu-<uid>.sock
+                 │  /tmp/tessera-<uid>.sock
 ┌────────────────┴─────────────────────────┐
-│  termemu-daemon (백그라운드)              │
+│  tessera-daemon (백그라운드)              │
 │  - Session / Window / Pane 트리 관리     │
 │  - PTY spawn/read/write                  │
 │  - epoll 기반 다중 클라이언트 처리        │
 └──────────────────────────────────────────┘
 ```
 
-**on-demand spawn**: `termemu` 하나만 실행하면 데몬이 없을 때 자동 스폰됩니다.
+**on-demand spawn**: `tessera` 하나만 실행하면 데몬이 없을 때 자동 스폰됩니다.
 
 ---
 
-## 4. termemu-daemon
+## 4. tessera-daemon
 
 ```bash
-./termemu-daemon           # 포그라운드 (디버그용)
-./termemu-daemon --daemon  # 백그라운드 데몬
-./termemu-daemon --help    # 도움말
+./tessera-daemon           # 포그라운드 (디버그용)
+./tessera-daemon --daemon  # 백그라운드 데몬
+./tessera-daemon --help    # 도움말
 ```
 
-소켓 경로: `/tmp/termemu-<uid>.sock`
+소켓 경로: `/tmp/tessera-<uid>.sock`
 
-종료: `pkill termemu-daemon` (SIGTERM/SIGINT으로 정상 종료)
+종료: `pkill tessera-daemon` (SIGTERM/SIGINT으로 정상 종료)
 
 ---
 
-## 5. termemu (클라이언트)
+## 5. tessera (클라이언트)
 
 ```bash
-termemu
+tessera
 ```
 
-1. `~/.config/termemu/config.json` 로드
+1. `~/.config/tessera/config.json` 로드
 2. GLFW 창 생성 (1280x720, OpenGL 3.3 Core)
 3. 데몬 연결 (없으면 자동 스폰)
 4. 기본 세션/윈도우/pane 생성 → `$SHELL` 실행
@@ -176,13 +176,13 @@ termemu
 ### 위치
 
 ```
-~/.config/termemu/config.json
+~/.config/tessera/config.json
 ```
 
 ### 핫 리로드
 
 설정 파일을 수정하면 inotify로 자동 감지되어 **재시작 없이 즉시 적용**됩니다.
-수동 리로드: `kill -HUP $(pgrep termemu)`
+수동 리로드: `kill -HUP $(pgrep tessera)`
 
 ### 전체 옵션
 
@@ -226,7 +226,7 @@ termemu
 ### 위치
 
 ```
-~/.config/termemu/themes/<이름>.json
+~/.config/tessera/themes/<이름>.json
 ```
 
 ### 포맷 (Windows Terminal `schemes` 호환)
@@ -299,25 +299,25 @@ termemu
 
 ### 전제 조건
 
-원격 서버에 `termemu-daemon`과 `termemu-bridge`가 설치되어 있어야 합니다.
+원격 서버에 `tessera-daemon`과 `tessera-bridge`가 설치되어 있어야 합니다.
 
 ### 사용법
 
 ```bash
 # 원격 서버의 세션에 attach
-termemu --remote user@server --attach work
+tessera --remote user@server --attach work
 
 # 로컬 daemon의 기존 세션에 attach (두 번째 클라이언트)
-termemu --attach default
+tessera --attach default
 ```
 
 ### 동작 방식
 
 ```
-[local termemu] <--stdin/stdout--> [ssh user@host termemu-bridge] <--socket--> [remote daemon]
+[local tessera] <--stdin/stdout--> [ssh user@host tessera-bridge] <--socket--> [remote daemon]
 ```
 
-1. SSH로 원격의 `termemu-bridge` 실행
+1. SSH로 원격의 `tessera-bridge` 실행
 2. bridge가 원격 daemon의 Unix 소켓에 연결
 3. 로컬 클라이언트가 기존 IPC 프로토콜로 통신
 4. `--attach`로 기존 세션에 연결하면:
@@ -363,7 +363,7 @@ src/
 │   │   └── fs_watch_posix.c  # inotify 파일 감시
 │   ├── fs_watch.h    # 파일 감시 추상화
 │   ├── ipc.h         # IPC 소켓 추상화
-│   └── termemu_pty.h # PTY 추상화
+│   └── tessera_pty.h # PTY 추상화
 │
 ├── daemon/
 │   ├── session.c    # Session/Window/Pane 트리

@@ -37,7 +37,7 @@ static void test_color_parse(void) {
 
 static void test_theme_defaults(void) {
     TEST("theme_defaults");
-    termemu_theme_t t;
+    tessera_theme_t t;
     theme_defaults(&t);
 
     ASSERT(strcmp(t.name, "default") == 0,  "name = \"default\"");
@@ -76,7 +76,7 @@ static const char *DRACULA_JSON =
 
 static void test_theme_load_dracula(void) {
     TEST("theme_load_string: Dracula");
-    termemu_theme_t t;
+    tessera_theme_t t;
     bool ok = theme_load_string(DRACULA_JSON, &t);
 
     ASSERT(ok,                               "파싱 성공");
@@ -98,7 +98,7 @@ static void test_theme_load_dracula(void) {
 static void test_theme_load_partial(void) {
     TEST("theme_load_string: 부분 JSON (누락 필드 → 기본값)");
     const char *json = "{\"name\":\"Partial\",\"background\":\"#123456\"}";
-    termemu_theme_t t;
+    tessera_theme_t t;
     bool ok = theme_load_string(json, &t);
 
     ASSERT(ok,                              "파싱 성공");
@@ -109,7 +109,7 @@ static void test_theme_load_partial(void) {
 
 static void test_theme_load_invalid_json(void) {
     TEST("theme_load_string: 잘못된 JSON → false");
-    termemu_theme_t t;
+    tessera_theme_t t;
     ASSERT(!theme_load_string("{not valid json", &t), "잘못된 JSON → false");
     ASSERT(!theme_load_string(NULL, &t),              "NULL → false");
 }
@@ -118,7 +118,7 @@ static void test_theme_load_invalid_json(void) {
 
 static void test_config_defaults(void) {
     TEST("config_defaults");
-    termemu_config_t cfg;
+    tessera_config_t cfg;
     config_defaults(&cfg);
 
     ASSERT(cfg.font_size > 0,                       "font_size > 0");
@@ -146,7 +146,7 @@ static const char *FULL_CONFIG_JSON =
 
 static void test_config_load_full(void) {
     TEST("config_load_string: 전체 필드");
-    termemu_config_t cfg;
+    tessera_config_t cfg;
     bool ok = config_load_string(FULL_CONFIG_JSON, &cfg);
 
     ASSERT(ok,                                          "파싱 성공");
@@ -165,7 +165,7 @@ static void test_config_load_full(void) {
 
 static void test_config_cursor_styles(void) {
     TEST("config_load_string: cursor style 파싱");
-    termemu_config_t cfg;
+    tessera_config_t cfg;
 
     config_load_string("{\"cursor\":{\"style\":\"block\"}}", &cfg);
     ASSERT(cfg.cursor_style == CURSOR_BLOCK,     "\"block\"");
@@ -182,7 +182,7 @@ static void test_config_cursor_styles(void) {
 
 static void test_config_scrollback_clamp(void) {
     TEST("config_load_string: scrollback_lines 범위 클램프");
-    termemu_config_t cfg;
+    tessera_config_t cfg;
 
     config_load_string("{\"scrollback_lines\": 0}", &cfg);
     ASSERT(cfg.scrollback_lines == 1,      "0 → 1 (최솟값)");
@@ -196,7 +196,7 @@ static void test_config_scrollback_clamp(void) {
 
 static void test_config_opacity_clamp(void) {
     TEST("config_load_string: opacity 범위 클램프");
-    termemu_config_t cfg;
+    tessera_config_t cfg;
 
     config_load_string("{\"window\":{\"opacity\": -0.5}}", &cfg);
     ASSERT_FLOAT(cfg.opacity, 0.0f, "-0.5 → 0.0");
@@ -207,7 +207,7 @@ static void test_config_opacity_clamp(void) {
 
 static void test_config_partial(void) {
     TEST("config_load_string: 부분 JSON → 나머지 기본값");
-    termemu_config_t cfg;
+    tessera_config_t cfg;
     config_load_string("{\"theme\":\"Catppuccin\"}", &cfg);
 
     ASSERT(strcmp(cfg.theme_name, "Catppuccin") == 0, "theme 적용됨");
@@ -217,7 +217,7 @@ static void test_config_partial(void) {
 
 static void test_config_invalid_json(void) {
     TEST("config_load_string: 잘못된 JSON → false");
-    termemu_config_t cfg;
+    tessera_config_t cfg;
     ASSERT(!config_load_string("{bad json", &cfg), "잘못된 JSON → false");
     ASSERT(!config_load_string(NULL, &cfg),        "NULL → false");
 }

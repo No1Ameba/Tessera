@@ -4,13 +4,13 @@
 /* ─── 내장 테마 프리셋 정의 ──────────────────────────────────────────────── */
 
 /*
- * 팔레트 순서 (termemu_theme_t.ansi):
+ * 팔레트 순서 (tessera_theme_t.ansi):
  *   0 black, 1 red, 2 green, 3 yellow, 4 blue, 5 magenta, 6 cyan, 7 white
  *   8 brBlack, 9 brRed, 10 brGreen, 11 brYellow, 12 brBlue, 13 brMagenta,
  *   14 brCyan, 15 brWhite
  */
 
-static const termemu_theme_t PRESETS[] = {
+static const tessera_theme_t PRESETS[] = {
     /* 0: Default (VS Code Dark+) — theme_defaults 와 동일 */
     {
         .name = "Default",
@@ -97,7 +97,7 @@ const char *theme_preset_name(int idx)
     return PRESETS[idx].name;
 }
 
-bool theme_preset_get(int idx, termemu_theme_t *out)
+bool theme_preset_get(int idx, tessera_theme_t *out)
 {
     if (!out || idx < 0 || idx >= PRESET_COUNT) return false;
     *out = PRESETS[idx];
@@ -106,7 +106,7 @@ bool theme_preset_get(int idx, termemu_theme_t *out)
 
 /* 테마의 "보이는" 색상 필드만 비교 (name 은 제외).
  * background / foreground / cursor_color / selection_background / ansi[16]. */
-static int theme_palette_equal(const termemu_theme_t *a, const termemu_theme_t *b)
+static int theme_palette_equal(const tessera_theme_t *a, const tessera_theme_t *b)
 {
     if (a->background != b->background) return 0;
     if (a->foreground != b->foreground) return 0;
@@ -117,7 +117,7 @@ static int theme_palette_equal(const termemu_theme_t *a, const termemu_theme_t *
     return 1;
 }
 
-int theme_preset_match(const termemu_theme_t *t)
+int theme_preset_match(const tessera_theme_t *t)
 {
     if (!t) return -1;
     for (int i = 0; i < PRESET_COUNT; i++)

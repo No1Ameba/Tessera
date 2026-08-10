@@ -135,7 +135,7 @@ static void load_font_list(void)
 
 /* ── 탭별 내용 ──────────────────────────────────────────────────────────── */
 
-static void tab_font(struct nk_context *ctx, termemu_config_t *cfg)
+static void tab_font(struct nk_context *ctx, tessera_config_t *cfg)
 {
     load_font_list();
 
@@ -172,7 +172,7 @@ static void tab_font(struct nk_context *ctx, termemu_config_t *cfg)
     nk_layout_row_end(ctx);
 }
 
-static void tab_window(struct nk_context *ctx, termemu_config_t *cfg)
+static void tab_window(struct nk_context *ctx, tessera_config_t *cfg)
 {
     /* Opacity — 바 클릭으로 위치 이동 (커스텀 slider) */
     nk_layout_row_begin(ctx, NK_DYNAMIC, 30, 2);
@@ -283,7 +283,7 @@ static void tab_window(struct nk_context *ctx, termemu_config_t *cfg)
     cfg->confirm_close_session = c_session ? true : false;
 }
 
-static void tab_keybindings(struct nk_context *ctx, termemu_config_t *cfg)
+static void tab_keybindings(struct nk_context *ctx, tessera_config_t *cfg)
 {
     keybindings_t *kb = &cfg->keybindings;
     keybind_row(ctx, "Split Vertical:",   kb->split_vertical,   sizeof(kb->split_vertical));
@@ -304,7 +304,7 @@ static void tab_keybindings(struct nk_context *ctx, termemu_config_t *cfg)
     keybind_row(ctx, "Resize Down:",      kb->resize_down,      sizeof(kb->resize_down));
 }
 
-static void tab_colors(struct nk_context *ctx, termemu_theme_t *theme)
+static void tab_colors(struct nk_context *ctx, tessera_theme_t *theme)
 {
     /* ── 프리셋 드롭다운 (최상단) ─────────────────────────────────────── */
     int preset_count = theme_preset_count();
@@ -327,7 +327,7 @@ static void tab_colors(struct nk_context *ctx, termemu_theme_t *theme)
 
     if (new_sel != current && new_sel >= 0 && new_sel < preset_count) {
         /* 프리셋 선택 — name 은 유지, 색상만 교체 */
-        termemu_theme_t preset;
+        tessera_theme_t preset;
         if (theme_preset_get(new_sel, &preset)) {
             theme->background            = preset.background;
             theme->foreground            = preset.foreground;
@@ -363,7 +363,7 @@ static void tab_colors(struct nk_context *ctx, termemu_theme_t *theme)
 }
 
 static void tab_export(struct nk_context *ctx,
-                        termemu_config_t *cfg, termemu_theme_t *theme,
+                        tessera_config_t *cfg, tessera_theme_t *theme,
                         const char *cfg_path, const char *theme_path)
 {
     /* Config Export — 파일 picker 로 경로 선택 */
@@ -455,8 +455,8 @@ static void tab_export(struct nk_context *ctx,
 /* ── 공개 API ───────────────────────────────────────────────────────────── */
 
 int settings_ui_draw(struct nk_context *ctx,
-                      termemu_config_t *cfg,
-                      termemu_theme_t *theme,
+                      tessera_config_t *cfg,
+                      tessera_theme_t *theme,
                       const char *cfg_path,
                       const char *theme_path,
                       float win_w, float win_h)

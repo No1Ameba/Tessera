@@ -1,5 +1,5 @@
-#ifndef TERMEMU_IPC_SERVER_H
-#define TERMEMU_IPC_SERVER_H
+#ifndef TESSERA_IPC_SERVER_H
+#define TESSERA_IPC_SERVER_H
 
 /*
  * IPC 서버 — 이벤트 루프 추상화(POSIX: epoll, Windows: IOCP 예정)
@@ -35,7 +35,7 @@ ipc_server_t *ipc_server_create(session_manager_t *session_mgr);
 int ipc_server_listen(ipc_server_t *srv);
 
 /*
- * ~/.config/termemu/sessions 디렉토리의 .json 스냅샷을 스캔하여 세션을 복원한다.
+ * ~/.config/tessera/sessions 디렉토리의 .json 스냅샷을 스캔하여 세션을 복원한다.
  * 각 세션에 대해 window/pane 구조를 재생성하고 PTY 를 스폰한다.
  * cwd 가 있으면 "cd <dir>\nclear\n" 을 PTY 에 주입하여 디렉토리 복원.
  * ipc_server_listen() 이후, ipc_server_run() 이전에 호출.
@@ -67,4 +67,4 @@ void ipc_server_shutdown(ipc_server_t *srv);
  */
 void ipc_server_destroy(ipc_server_t *srv);
 
-#endif /* TERMEMU_IPC_SERVER_H */
+#endif /* TESSERA_IPC_SERVER_H */

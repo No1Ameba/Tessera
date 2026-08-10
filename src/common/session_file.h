@@ -1,5 +1,5 @@
-#ifndef TERMEMU_SESSION_FILE_H
-#define TERMEMU_SESSION_FILE_H
+#ifndef TESSERA_SESSION_FILE_H
+#define TESSERA_SESSION_FILE_H
 
 /*
  * 세션 스냅샷 직렬화/역직렬화
@@ -47,4 +47,4 @@ int session_snapshot_save(const char *path, const session_snapshot_t *snap);
  */
 int session_snapshot_load(const char *path, session_snapshot_t *snap);
 
-#endif /* TERMEMU_SESSION_FILE_H */
+#endif /* TESSERA_SESSION_FILE_H */

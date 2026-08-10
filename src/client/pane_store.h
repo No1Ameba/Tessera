@@ -1,5 +1,5 @@
-#ifndef TERMEMU_PANE_STORE_H
-#define TERMEMU_PANE_STORE_H
+#ifndef TESSERA_PANE_STORE_H
+#define TESSERA_PANE_STORE_H
 
 #include <stdint.h>
 #include "screen.h"
@@ -28,4 +28,4 @@ void pane_slot_free(uint32_t pane_id);
 /* 인덱스(0..MAX_PANES-1)로 슬롯 접근. 전체 순회용. 범위 밖이면 NULL. */
 pane_slot_t *pane_slot_at(int index);
 
-#endif /* TERMEMU_PANE_STORE_H */
+#endif /* TESSERA_PANE_STORE_H */

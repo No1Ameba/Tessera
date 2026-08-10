@@ -1,5 +1,5 @@
-#ifndef TERMEMU_IPC_H
-#define TERMEMU_IPC_H
+#ifndef TESSERA_IPC_H
+#define TESSERA_IPC_H
 
 /*
  * IPC 소켓 추상화 — 플랫폼 저수준 래퍼
@@ -17,7 +17,7 @@
 
 /*
  * 현재 사용자 uid 기반 소켓 경로를 buf 에 쓴다.
- * POSIX: "/tmp/termemu-<uid>.sock"
+ * POSIX: "/tmp/tessera-<uid>.sock"
  *
  * @return  0 성공, -1 실패 (buf 너무 짧음 등)
  */
@@ -46,4 +46,4 @@ int ipc_accept_client(int listen_fd);
  */
 void ipc_close_socket(int fd, const char *path);
 
-#endif /* TERMEMU_IPC_H */
+#endif /* TESSERA_IPC_H */

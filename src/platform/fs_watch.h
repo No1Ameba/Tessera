@@ -1,5 +1,5 @@
-#ifndef TERMEMU_FS_WATCH_H
-#define TERMEMU_FS_WATCH_H
+#ifndef TESSERA_FS_WATCH_H
+#define TESSERA_FS_WATCH_H
 
 /*
  * 파일 변경 감시 — 설정 핫 리로드용
@@ -31,4 +31,4 @@ int fs_watch_poll(void *handle);
  */
 void fs_watch_destroy(void *handle);
 
-#endif /* TERMEMU_FS_WATCH_H */
+#endif /* TESSERA_FS_WATCH_H */

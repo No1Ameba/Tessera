@@ -1,7 +1,7 @@
 /* GNU/POSIX/BSD 확장 활성화: forkpty, setenv, nanosleep, kill */
 #define _GNU_SOURCE
 
-#include "../termemu_pty.h"
+#include "../tessera_pty.h"
 
 #include <errno.h>
 #include <fcntl.h>

@@ -1,5 +1,5 @@
-#ifndef TERMEMU_FONT_H
-#define TERMEMU_FONT_H
+#ifndef TESSERA_FONT_H
+#define TESSERA_FONT_H
 
 /*
  * Font rasterization — FreeType 2 + HarfBuzz
@@ -88,4 +88,4 @@ int font_cell_height(font_face_t *face);
 /* Distance from cell top to text baseline in pixels. */
 int font_ascender(font_face_t *face);
 
-#endif /* TERMEMU_FONT_H */
+#endif /* TESSERA_FONT_H */

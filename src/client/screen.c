@@ -944,7 +944,7 @@ const char *screen_link_url(const screen_t *s, uint16_t link_id)
 }
 
 /* 팔레트 + 기본 fg/bg 갱신 공통 로직 */
-static void apply_palette(screen_t *s, const termemu_theme_t *t)
+static void apply_palette(screen_t *s, const tessera_theme_t *t)
 {
     for (int i = 0; i < 16; i++) {
         uint32_t c = t->ansi[i];
@@ -960,7 +960,7 @@ static void apply_palette(screen_t *s, const termemu_theme_t *t)
     s->default_bg_b = (uint8_t)( t->background        & 0xFF);
 }
 
-void screen_update_palette(screen_t *s, const termemu_theme_t *t)
+void screen_update_palette(screen_t *s, const tessera_theme_t *t)
 {
     if (!s || !t) return;
 
@@ -1007,7 +1007,7 @@ void screen_update_palette(screen_t *s, const termemu_theme_t *t)
     }
 }
 
-void screen_apply_theme(screen_t *s, const termemu_theme_t *t)
+void screen_apply_theme(screen_t *s, const tessera_theme_t *t)
 {
     if (!s || !t) return;
     apply_palette(s, t);

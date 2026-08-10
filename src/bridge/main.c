@@ -1,10 +1,10 @@
 /*
- * termemu-bridge — stdin/stdout ↔ Unix socket 양방향 바이트 릴레이
+ * tessera-bridge — stdin/stdout ↔ Unix socket 양방향 바이트 릴레이
  *
  * 원격 세션 동기화에 사용:
- *   ssh user@host termemu-bridge
+ *   ssh user@host tessera-bridge
  *
- * 로컬 termemu 클라이언트가 SSH를 통해 이 바이너리와 통신하면,
+ * 로컬 tessera 클라이언트가 SSH를 통해 이 바이너리와 통신하면,
  * bridge가 로컬 daemon의 Unix 소켓으로 메시지를 중계한다.
  */
 
@@ -41,7 +41,7 @@ int main(void)
     /* daemon Unix 소켓에 연결 */
     char path[IPC_SOCKET_PATH_MAX];
     if (ipc_socket_path(path, sizeof path) < 0) {
-        fprintf(stderr, "termemu-bridge: socket path error\n");
+        fprintf(stderr, "tessera-bridge: socket path error\n");
         return 1;
     }
 

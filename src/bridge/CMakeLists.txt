@@ -1,10 +1,10 @@
-if(TERMEMU_BUILD_APPS)
-    add_executable(termemu-bridge main.c)
+if(TESSERA_BUILD_APPS)
+    add_executable(tessera-bridge main.c)
 
-    target_link_libraries(termemu-bridge
-        PRIVATE termemu_ipc
-        PRIVATE termemu_common
+    target_link_libraries(tessera-bridge
+        PRIVATE tessera_ipc
+        PRIVATE tessera_common
     )
 
-    install(TARGETS termemu-bridge RUNTIME DESTINATION bin)
+    install(TARGETS tessera-bridge RUNTIME DESTINATION bin)
 endif()

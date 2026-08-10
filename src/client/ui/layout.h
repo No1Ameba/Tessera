@@ -1,5 +1,5 @@
-#ifndef TERMEMU_LAYOUT_H
-#define TERMEMU_LAYOUT_H
+#ifndef TESSERA_LAYOUT_H
+#define TESSERA_LAYOUT_H
 
 /*
  * Tiling layout — binary-tree-based pane splitting.
@@ -102,4 +102,4 @@ int layout_serialize(const layout_node_t *root, uint8_t *buf, size_t buf_size);
  */
 layout_node_t *layout_deserialize(const uint8_t *buf, size_t buf_size);
 
-#endif /* TERMEMU_LAYOUT_H */
+#endif /* TESSERA_LAYOUT_H */

@@ -24,8 +24,8 @@ Daemon
   - 소켓 준비 완료까지 클라이언트가 대기 후 재연결.
 - **종료 조건:** 모든 세션이 소멸되면 데몬 자동 종료.
 - **명시적 제어 CLI:**
-  - `termemu daemon start` / `termemu daemon stop`
-  - `termemu session list` / `termemu session attach <name>`
+  - `tessera daemon start` / `tessera daemon stop`
+  - `tessera session list` / `tessera session attach <name>`
 
 ### 스크롤백 버퍼
 - **기본값:** 세션당 10,000줄.
@@ -82,8 +82,8 @@ Daemon
 
 ## 6. 설정 파일 구조
 - **위치:** OS별 표준 설정 디렉토리 사용.
-  - Linux/macOS: `$XDG_CONFIG_HOME/termemu/` (기본값: `~/.config/termemu/`)
-  - Windows: `%APPDATA%\termemu\`
+  - Linux/macOS: `$XDG_CONFIG_HOME/tessera/` (기본값: `~/.config/tessera/`)
+  - Windows: `%APPDATA%\tessera\`
 - **파일 구성:**
   - `config.json` — 전체 동작 설정 (폰트, 단축키, 동작 옵션)
   - `themes/` 디렉토리 — 테마 JSON 파일 모음 (Windows Terminal 스키마 호환)

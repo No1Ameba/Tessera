@@ -6,7 +6,7 @@
 #include "../common/session_file.h"
 #include <dirent.h>
 #include "../platform/ipc.h"
-#include "../platform/termemu_pty.h"
+#include "../platform/tessera_pty.h"
 #include "../platform/event_loop.h"
 
 #include <errno.h>
@@ -808,7 +808,7 @@ static void handle_session_save(ipc_server_t *srv, int client_fd,
 
     /* 임시 파일에 JSON 직렬화 후 읽어서 전송 */
     char tmp_path[64];
-    snprintf(tmp_path, sizeof tmp_path, "/tmp/termemu-snap-%d.json", (int)getpid());
+    snprintf(tmp_path, sizeof tmp_path, "/tmp/tessera-snap-%d.json", (int)getpid());
     if (session_snapshot_save(tmp_path, &snap) != 0) {
         send_error(client_fd, IPC_MSG_SESSION_SAVE,
                    IPC_ERR_UNKNOWN, "snapshot serialize failed");
@@ -1215,12 +1215,12 @@ static int restore_one_snapshot(ipc_server_t *srv, const session_snapshot_t *sna
     return 0;
 }
 
-/* ~/.config/termemu/sessions/<name>.json 경로 조립. home 없으면 -1. */
+/* ~/.config/tessera/sessions/<name>.json 경로 조립. home 없으면 -1. */
 static int snapshot_path(const char *sess_name, char *out, size_t out_size)
 {
     const char *home = getenv("HOME");
     if (!home) return -1;
-    int n = snprintf(out, out_size, "%s/.config/termemu/sessions/%s.json",
+    int n = snprintf(out, out_size, "%s/.config/tessera/sessions/%s.json",
                      home, sess_name);
     return (n > 0 && (size_t)n < out_size) ? 0 : -1;
 }
@@ -1239,7 +1239,7 @@ static void save_all_sessions(ipc_server_t *srv)
     const char *home = getenv("HOME");
     if (!home) return;
     char dir[256];
-    snprintf(dir, sizeof dir, "%s/.config/termemu/sessions", home);
+    snprintf(dir, sizeof dir, "%s/.config/tessera/sessions", home);
     mkdir(dir, 0755);
     for (session_t *s = srv->session_mgr->head; s; s = s->next) {
         session_snapshot_t snap;
@@ -1276,7 +1276,7 @@ int ipc_server_restore_sessions(ipc_server_t *srv)
     const char *home = getenv("HOME");
     if (!home) return 0;
     char dir[512];
-    snprintf(dir, sizeof dir, "%s/.config/termemu/sessions", home);
+    snprintf(dir, sizeof dir, "%s/.config/tessera/sessions", home);
 
     DIR *d = opendir(dir);
     if (!d) return 0;
@@ -1297,7 +1297,7 @@ int ipc_server_restore_sessions(ipc_server_t *srv)
 
         if (restore_one_snapshot(srv, &snap) == 0) {
             restored++;
-            fprintf(stderr, "[termemu-daemon] restored session '%s' (%d windows)\n",
+            fprintf(stderr, "[tessera-daemon] restored session '%s' (%d windows)\n",
                     snap.name, snap.window_count);
         }
     }

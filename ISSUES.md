@@ -54,14 +54,14 @@
 **검증 결과 — 진짜였고 이번에 수정함 (branch `chore/review-hardening`)**:
 - `ipc_client.c` `ipc_client_session_save()` — 데몬이 NUL 종료 없이 보낸 JSON 페이로드를 `fputs` 로 기록해 초기화되지 않은 스택을 넘어 읽던 버그. 버퍼 제로초기화 + 여유 1바이트로 트레일링 NUL 보장하도록 수정.
 - `config.c` `theme_load_file()` / `config_load_file()` — `fread` 반환값 미검사(부분 읽기 시 잘린 버퍼 파싱). 짧은 읽기 감지 시 실패 반환.
-- `CMakeLists.txt` — `TERMEMU_SANITIZE` 옵션(ASan+UBSan) 추가. VT/IPC/config 파싱 경로 런타임 검출용.
+- `CMakeLists.txt` — `TESSERA_SANITIZE` 옵션(ASan+UBSan) 추가. VT/IPC/config 파싱 경로 런타임 검출용.
 - 문서 정합: `renderring-spec.md` → `rendering-spec.md` 오타 수정(CLAUDE.md 링크 정상화), 위 stbtt/FreeType·`font_face.{c,h}` 오기 정정.
 
 **남은 백로그 (대형 — 각자 전용 작업으로 착수 필요, 착수는 사용자 지시 후)**:
 1. **[상] 한글 출력: 폰트 폴백 체인** — `renderer/font.{c,h}` 의 `font_t` 를 face 배열(우선순위)로 확장, 글리프 미존재 시 다음 face 로 shape. `.notdef` 도 없이 글리프가 조용히 사라지는 현행 동작 제거. 아틀라스 만석/eviction 처리 동반. 구조적으로 실현 가능.
 2. **[상] 한글 입력: IME 재설계** — 현행 `main.c` 의 pending-byte 스테이징 + `codepoint>=0x80` 휴리스틱은 취약(콜백 순서 가정, Ctrl+key 와 IME 출력 혼동). preedit 상태를 명시적 `ime_state_t` 로 추적하고 커밋 텍스트만 PTY 전송. GLFW preedit API 또는 플랫폼 IME 브릿지 필요.
 3. **[중] `main.c` 갓파일 분해** — 2254줄, 전역 60+개, 콜백이 전역 직접 변조. `app_t` 구조체로 상태 캡슐화 + 모듈 분리(input/layout/ui). IME 재설계와 병행 시 시너지.
-4. **[중] Windows 백엔드** — 🔶 **leaf 착수(branch `feat/windows-backend`, 2026-08-07, MSVC 미검증)**. `pty_win.c`(ConPTY), `fs_watch_win.c`(ReadDirectoryChangesW), `ipc_win.c`(Named Pipe 골격) 구현 + `termemu_pty.h` `_WIN32` 이식성. **정정: "backend 3종만 구현하면 됨" 은 과소평가였음** — 데몬(`ipc_server.c`)이 epoll + 논블로킹 fd 이벤트 루프에 강결합돼 있어 Windows 데몬은 **IOCP 포팅이 별도 대공사**로 남는다. 또 이 leaf 코드는 현재 환경(Linux)에서 컴파일 검증 불가 → **Windows CI 잡 신설이 실제 검증 경로**. README 의 "크로스플랫폼" 주장은 데몬 포팅+CI 통과 전까지 과장. **진행(branch `refactor/daemon-eventloop`, 2026-08-10)**: 데몬의 raw epoll 을 `platform/event_loop.{h}` 추상화 뒤로 분리(POSIX=`event_loop_posix.c` epoll, Windows=`event_loop_win.c` IOCP 스켈레톤). `ipc_server.c` 는 이제 `evloop_*` 만 사용 → **리눅스 빌드+test_ipc(데몬 루프 실행)+ASan 통과 검증**. 남은 IOCP 대공사가 "데몬 전체 재작성"에서 "`event_loop_win.c` 한 파일(GetQueuedCompletionStatus→readiness 어댑터) 구현"으로 축소됨(+빌드 시스템의 cJSON/FreeType vcpkg 이식).
+4. **[중] Windows 백엔드** — 🔶 **leaf 착수(branch `feat/windows-backend`, 2026-08-07, MSVC 미검증)**. `pty_win.c`(ConPTY), `fs_watch_win.c`(ReadDirectoryChangesW), `ipc_win.c`(Named Pipe 골격) 구현 + `tessera_pty.h` `_WIN32` 이식성. **정정: "backend 3종만 구현하면 됨" 은 과소평가였음** — 데몬(`ipc_server.c`)이 epoll + 논블로킹 fd 이벤트 루프에 강결합돼 있어 Windows 데몬은 **IOCP 포팅이 별도 대공사**로 남는다. 또 이 leaf 코드는 현재 환경(Linux)에서 컴파일 검증 불가 → **Windows CI 잡 신설이 실제 검증 경로**. README 의 "크로스플랫폼" 주장은 데몬 포팅+CI 통과 전까지 과장. **진행(branch `refactor/daemon-eventloop`, 2026-08-10)**: 데몬의 raw epoll 을 `platform/event_loop.{h}` 추상화 뒤로 분리(POSIX=`event_loop_posix.c` epoll, Windows=`event_loop_win.c` IOCP 스켈레톤). `ipc_server.c` 는 이제 `evloop_*` 만 사용 → **리눅스 빌드+test_ipc(데몬 루프 실행)+ASan 통과 검증**. 남은 IOCP 대공사가 "데몬 전체 재작성"에서 "`event_loop_win.c` 한 파일(GetQueuedCompletionStatus→readiness 어댑터) 구현"으로 축소됨(+빌드 시스템의 cJSON/FreeType vcpkg 이식).
 5. **[중] IPC 견고성** — 프로토콜 구조체에 `packed`/명시적 직렬화·버전 협상 부재(엔디안/패딩 이식성), 느린 클라이언트에 대한 백프레셔 없음(`write_all_retry` 의 poll 이 epoll 루프 지연). 소켓 경로 `$XDG_RUNTIME_DIR` 우선 전환.
 6. **[하] 세션 `next_id` 2^32 래핑, config 핫리로드 콜백 중 발동 defer** 등.
 

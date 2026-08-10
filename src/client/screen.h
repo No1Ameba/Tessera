@@ -1,5 +1,5 @@
-#ifndef TERMEMU_SCREEN_H
-#define TERMEMU_SCREEN_H
+#ifndef TESSERA_SCREEN_H
+#define TESSERA_SCREEN_H
 
 /*
  * Screen buffer — VT 파서 이벤트를 cell grid로 변환한다.
@@ -190,14 +190,14 @@ const char *screen_get_title(const screen_t *s);
  * screen_init() 직후에 호출한다.
  */
 #include "../common/config.h"
-void screen_apply_theme(screen_t *s, const termemu_theme_t *t);
+void screen_apply_theme(screen_t *s, const tessera_theme_t *t);
 
 /*
  * 팔레트와 기본 fg/bg 색상만 갱신한다 (런타임 리로드용).
  * 기존 셀 내용은 변경하지 않는다.
  * SIGHUP 등 실행 중 테마 교체 시 사용한다.
  */
-void screen_update_palette(screen_t *s, const termemu_theme_t *t);
+void screen_update_palette(screen_t *s, const tessera_theme_t *t);
 
 /*
  * OSC 52 클립보드 콜백을 등록한다.
@@ -211,4 +211,4 @@ void screen_set_clipboard_cb(screen_t *s,
 /* link_id 로 저장된 URL 을 조회한다. 없으면 NULL. */
 const char *screen_link_url(const screen_t *s, uint16_t link_id);
 
-#endif /* TERMEMU_SCREEN_H */
+#endif /* TESSERA_SCREEN_H */

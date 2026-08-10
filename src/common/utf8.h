@@ -1,5 +1,5 @@
-#ifndef TERMEMU_UTF8_H
-#define TERMEMU_UTF8_H
+#ifndef TESSERA_UTF8_H
+#define TESSERA_UTF8_H
 
 /*
  * UTF-8 유틸리티
@@ -46,4 +46,4 @@ size_t utf8_str_width(const char *str);
 /* NUL-terminated UTF-8 문자열의 코드 포인트 수 */
 size_t utf8_cp_count(const char *str);
 
-#endif /* TERMEMU_UTF8_H */
+#endif /* TESSERA_UTF8_H */

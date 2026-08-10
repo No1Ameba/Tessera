@@ -1,5 +1,5 @@
-#ifndef TERMEMU_TEXT_SELECT_H
-#define TERMEMU_TEXT_SELECT_H
+#ifndef TESSERA_TEXT_SELECT_H
+#define TESSERA_TEXT_SELECT_H
 
 #include <stdint.h>
 #include "screen.h"
@@ -28,4 +28,4 @@ char *selection_to_text(const screen_t *scr,
 int64_t li_from_view_row(const screen_t *s, int view_row);
 int     view_row_from_li(const screen_t *s, int64_t li);
 
-#endif /* TERMEMU_TEXT_SELECT_H */
+#endif /* TESSERA_TEXT_SELECT_H */

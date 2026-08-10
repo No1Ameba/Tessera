@@ -26,7 +26,7 @@ int ipc_socket_path(char *buf, size_t buflen) {
     if (runtime && runtime[0] == '/') {
         size_t rl = strlen(runtime);
         while (rl > 1 && runtime[rl - 1] == '/') rl--;  /* 후행 '/' 제거 */
-        n = snprintf(buf, buflen, "%.*s/termemu-%u.sock",
+        n = snprintf(buf, buflen, "%.*s/tessera-%u.sock",
                      (int)rl, runtime, (unsigned)getuid());
     } else {
         n = snprintf(buf, buflen, IPC_SOCKET_PATH_FMT, (unsigned)getuid());

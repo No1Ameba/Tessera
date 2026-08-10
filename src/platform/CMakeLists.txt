@@ -1,4 +1,4 @@
-if(TERMEMU_PLATFORM STREQUAL "windows")
+if(TESSERA_PLATFORM STREQUAL "windows")
     set(PTY_SOURCE       windows/pty_win.c)
     set(IPC_SOURCE       windows/ipc_win.c)
     set(FSWATCH_SOURCE   windows/fs_watch_win.c)
@@ -11,43 +11,43 @@ else()
 endif()
 
 # PTY 추상화 — 항상 빌드 (테스트에서 직접 링크 가능)
-add_library(termemu_pty STATIC ${PTY_SOURCE})
+add_library(tessera_pty STATIC ${PTY_SOURCE})
 
-target_include_directories(termemu_pty
+target_include_directories(tessera_pty
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 if(NOT WIN32)
-    target_link_libraries(termemu_pty PRIVATE util)
+    target_link_libraries(tessera_pty PRIVATE util)
 endif()
 
 # IPC 소켓 래퍼 + 이벤트 루프 — 항상 빌드 (테스트에서 직접 링크 가능)
-add_library(termemu_ipc STATIC ${IPC_SOURCE} ${EVENTLOOP_SOURCE})
+add_library(tessera_ipc STATIC ${IPC_SOURCE} ${EVENTLOOP_SOURCE})
 
-target_include_directories(termemu_ipc
+target_include_directories(tessera_ipc
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(termemu_ipc
-    PUBLIC termemu_common
+target_link_libraries(tessera_ipc
+    PUBLIC tessera_common
 )
 
 # Windows: GetUserNameA(advapi32). Named Pipe/ConPTY/ReadDirectoryChangesW 는
 # kernel32(기본 링크). POSIX 에는 영향 없음.
 if(WIN32)
-    target_link_libraries(termemu_ipc PRIVATE advapi32)
+    target_link_libraries(tessera_ipc PRIVATE advapi32)
 endif()
 
 # 전체 플랫폼 라이브러리 (fswatch 포함) — 앱 빌드 시에만
-if(TERMEMU_BUILD_APPS)
-    add_library(termemu_platform STATIC ${FSWATCH_SOURCE})
+if(TESSERA_BUILD_APPS)
+    add_library(tessera_platform STATIC ${FSWATCH_SOURCE})
 
-    target_include_directories(termemu_platform
+    target_include_directories(tessera_platform
         PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
     )
 
-    target_link_libraries(termemu_platform
-        PUBLIC termemu_pty
-        PUBLIC termemu_ipc
+    target_link_libraries(tessera_platform
+        PUBLIC tessera_pty
+        PUBLIC tessera_ipc
     )
 endif()

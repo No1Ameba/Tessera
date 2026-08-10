@@ -1,5 +1,5 @@
-#ifndef TERMEMU_UI_OVERLAY_H
-#define TERMEMU_UI_OVERLAY_H
+#ifndef TESSERA_UI_OVERLAY_H
+#define TESSERA_UI_OVERLAY_H
 
 /*
  * Nuklear 오버레이(설정/확인/컨텍스트 메뉴 등) 의 rect 계산 헬퍼.
@@ -32,4 +32,4 @@ void ui_overlay_popup_at(float anchor_x, float anchor_y,
                           float *out_x, float *out_y,
                           float *out_w, float *out_h);
 
-#endif /* TERMEMU_UI_OVERLAY_H */
+#endif /* TESSERA_UI_OVERLAY_H */

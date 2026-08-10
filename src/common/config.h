@@ -1,12 +1,12 @@
-#ifndef TERMEMU_CONFIG_H
-#define TERMEMU_CONFIG_H
+#ifndef TESSERA_CONFIG_H
+#define TESSERA_CONFIG_H
 
 /*
  * 설정 파일 파서 (JSON 기반)
  *
  * 파일 구조:
- *   ~/.config/termemu/config.json
- *   ~/.config/termemu/themes/<name>.json
+ *   ~/.config/tessera/config.json
+ *   ~/.config/tessera/themes/<name>.json
  *
  * 테마 포맷: Windows Terminal schemes 스키마 호환.
  * 색상 값: 0x00RRGGBB
@@ -38,7 +38,7 @@ typedef struct {
     uint32_t cursor_color;
     uint32_t selection_background;
     uint32_t ansi[16];
-} termemu_theme_t;
+} tessera_theme_t;
 
 /* ─── 단축키 ─────────────────────────────────────────────────────────────── */
 
@@ -86,7 +86,7 @@ typedef struct {
     bool           confirm_close_window;  /* window 닫기 전 확인 팝업 (다중 window 합류 시 사용) */
     bool           confirm_close_session; /* 앱/세션 종료 전 확인 팝업 */
     keybindings_t  keybindings;
-} termemu_config_t;
+} tessera_config_t;
 
 /* ─── 색상 파싱 ─────────────────────────────────────────────────────────── */
 
@@ -95,10 +95,10 @@ uint32_t color_parse_hex(const char *hex, uint32_t fallback);
 
 /* ─── 테마 API ──────────────────────────────────────────────────────────── */
 
-void theme_defaults(termemu_theme_t *t);
-bool theme_load_string(const char *json, termemu_theme_t *t);
-bool theme_load_file(const char *path, termemu_theme_t *t);
-bool theme_save_file(const char *path, const termemu_theme_t *t);
+void theme_defaults(tessera_theme_t *t);
+bool theme_load_string(const char *json, tessera_theme_t *t);
+bool theme_load_file(const char *path, tessera_theme_t *t);
+bool theme_save_file(const char *path, const tessera_theme_t *t);
 
 /* ─── 샘플 테마 프리셋 ───────────────────────────────────────────────────── */
 
@@ -107,17 +107,17 @@ int  theme_preset_count(void);
 /* 프리셋 이름 (UI 표시용). NULL 이 아님이 보장됨. */
 const char *theme_preset_name(int idx);
 /* 프리셋 내용을 out 에 기록. 잘못된 idx 면 false. */
-bool theme_preset_get(int idx, termemu_theme_t *out);
+bool theme_preset_get(int idx, tessera_theme_t *out);
 /* 주어진 테마가 어떤 프리셋과 정확히 일치하면 그 idx, 아니면 -1 (Custom). */
-int  theme_preset_match(const termemu_theme_t *t);
+int  theme_preset_match(const tessera_theme_t *t);
 
 /* ─── 설정 API ──────────────────────────────────────────────────────────── */
 
-void config_defaults(termemu_config_t *cfg);
-bool config_load_string(const char *json, termemu_config_t *cfg);
-bool config_load_file(const char *path, termemu_config_t *cfg);
+void config_defaults(tessera_config_t *cfg);
+bool config_load_string(const char *json, tessera_config_t *cfg);
+bool config_load_file(const char *path, tessera_config_t *cfg);
 
 /* cfg 내용을 path에 JSON으로 저장한다. 성공 시 true. */
-bool config_save_file(const char *path, const termemu_config_t *cfg);
+bool config_save_file(const char *path, const tessera_config_t *cfg);
 
-#endif /* TERMEMU_CONFIG_H */
+#endif /* TESSERA_CONFIG_H */

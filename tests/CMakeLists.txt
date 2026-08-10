@@ -1,25 +1,25 @@
 add_executable(test_vt_parser test_vt_parser.c)
-target_link_libraries(test_vt_parser PRIVATE termemu_common)
+target_link_libraries(test_vt_parser PRIVATE tessera_common)
 add_test(NAME vt_parser COMMAND test_vt_parser)
 
 add_executable(test_utf8 test_utf8.c)
-target_link_libraries(test_utf8 PRIVATE termemu_common)
+target_link_libraries(test_utf8 PRIVATE tessera_common)
 add_test(NAME utf8 COMMAND test_utf8)
 
 add_executable(test_config test_config.c)
-target_link_libraries(test_config PRIVATE termemu_common termemu_cjson)
+target_link_libraries(test_config PRIVATE tessera_common tessera_cjson)
 add_test(NAME config COMMAND test_config)
 
 add_executable(test_session test_session.c)
-target_link_libraries(test_session PRIVATE termemu_session)
+target_link_libraries(test_session PRIVATE tessera_session)
 add_test(NAME session COMMAND test_session)
 
 add_executable(test_pty test_pty.c)
-target_link_libraries(test_pty PRIVATE termemu_pty)
+target_link_libraries(test_pty PRIVATE tessera_pty)
 add_test(NAME pty COMMAND test_pty)
 
 add_executable(test_ipc test_ipc.c)
-target_link_libraries(test_ipc PRIVATE termemu_ipc_server Threads::Threads)
+target_link_libraries(test_ipc PRIVATE tessera_ipc_server Threads::Threads)
 add_test(NAME ipc COMMAND test_ipc)
 
 # ── Phase 3/4 tests (no OpenGL/display needed) ────────────────────────────
@@ -37,7 +37,7 @@ target_include_directories(test_font PRIVATE
     ${CMAKE_SOURCE_DIR}/src/client)
 target_link_libraries(test_font PRIVATE
     Freetype::Freetype
-    termemu_harfbuzz)
+    tessera_harfbuzz)
 add_test(NAME font COMMAND test_font)
 
 add_executable(test_screen test_screen.c

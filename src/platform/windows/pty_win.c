@@ -1,6 +1,6 @@
 /*
  * pty_win.c — Windows ConPTY 기반 PTY 백엔드.
- * termemu_pty.h 계약을 forkpty(pty_posix.c) 와 동일한 의미로 구현한다.
+ * tessera_pty.h 계약을 forkpty(pty_posix.c) 와 동일한 의미로 구현한다.
  *
  * ⚠️ 검증 상태: 이 파일은 Linux/WSL 개발 환경에서 컴파일 검증되지 않았다.
  *    MSVC(Windows 10 1809+ SDK, ConPTY 필요) 빌드/CI 에서 검증해야 한다.
@@ -14,7 +14,7 @@
  *   hout  = 자식 stdout/err 에서 읽는 파이프 read 핸들.
  * 논블로킹 read 는 PeekNamedPipe 로 흉내낸다(POSIX 의 O_NONBLOCK 대응).
  */
-#include "../termemu_pty.h"
+#include "../tessera_pty.h"
 
 #include <windows.h>
 #include <errno.h>

@@ -1,5 +1,5 @@
-#ifndef TERMEMU_CONFIRM_DIALOG_H
-#define TERMEMU_CONFIRM_DIALOG_H
+#ifndef TESSERA_CONFIRM_DIALOG_H
+#define TESSERA_CONFIRM_DIALOG_H
 
 #include <stdbool.h>
 
@@ -8,7 +8,7 @@
  *
  * - 한 번에 하나만 표시되는 싱글톤.
  * - "다시 묻지 않기" 체크박스는 호출측이 전달한 `dont_ask` 포인터를 갱신한다.
- *   (이 포인터는 해당 kind 에 대응하는 termemu_config_t 필드 주소)
+ *   (이 포인터는 해당 kind 에 대응하는 tessera_config_t 필드 주소)
  * - Esc 또는 Cancel 버튼 = 취소. Enter 또는 Confirm 버튼 = 승인.
  * - 기본 포커스는 Cancel 쪽 (실수 방지).
  */
@@ -58,4 +58,4 @@ void confirm_dialog_draw(struct nk_context *ctx,
                           struct GLFWwindow *win,
                           int win_w, int win_h);
 
-#endif /* TERMEMU_CONFIRM_DIALOG_H */
+#endif /* TESSERA_CONFIRM_DIALOG_H */

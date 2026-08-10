@@ -1,6 +1,6 @@
 # 클라이언트 실행 파일은 미구현 파일이 완성된 이후에만 빌드
-if(TERMEMU_BUILD_APPS)
-    add_executable(termemu
+if(TESSERA_BUILD_APPS)
+    add_executable(tessera
         main.c
         font_resolve.c
         pane_store.c
@@ -20,7 +20,7 @@ if(TERMEMU_BUILD_APPS)
         ui/ui_overlay.c
     )
 
-    target_include_directories(termemu PRIVATE
+    target_include_directories(tessera PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/vendor/nuklear
     )
@@ -28,16 +28,16 @@ if(TERMEMU_BUILD_APPS)
     # OpenGL (GLFW creates the context, but we still need to link the GL library)
     find_package(OpenGL REQUIRED)
 
-    target_link_libraries(termemu
-        PRIVATE termemu_common
-        PRIVATE termemu_platform
-        PRIVATE termemu_ipc
+    target_link_libraries(tessera
+        PRIVATE tessera_common
+        PRIVATE tessera_platform
+        PRIVATE tessera_ipc
         PRIVATE glad
         PRIVATE glfw
         PRIVATE OpenGL::GL
         PRIVATE Freetype::Freetype
-        PRIVATE termemu_harfbuzz
+        PRIVATE tessera_harfbuzz
     )
 
-    install(TARGETS termemu RUNTIME DESTINATION bin)
+    install(TARGETS tessera RUNTIME DESTINATION bin)
 endif()

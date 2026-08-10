@@ -69,7 +69,7 @@ jobs:
   # to epoll and needs an IOCP port first. This job therefore only compiles the
   # three Windows platform sources (ConPTY / Named Pipe / ReadDirectoryChangesW)
   # with cl /c to verify they build against the Windows SDK and that
-  # termemu_pty.h is Windows-valid. Their #includes are all source-relative, so
+  # tessera_pty.h is Windows-valid. Their #includes are all source-relative, so
   # no cJSON / FreeType / vcpkg are needed here.
   # ---------------------------------------------------------------------------
   build-windows:

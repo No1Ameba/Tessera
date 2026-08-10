@@ -10,7 +10,7 @@
  *       -lutil -o /tmp/test_pty && /tmp/test_pty
  */
 
-#include "termemu_pty.h"
+#include "tessera_pty.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -104,14 +104,14 @@ static void test_write_read(void) {
     pty_read_timeout(&pty, buf, sizeof(buf), 300);
 
     /* echo 명령으로 출력 유도 */
-    const char *cmd = "echo TERMEMU_TEST_OK\n";
+    const char *cmd = "echo TESSERA_TEST_OK\n";
     ssize_t written = pty_write(&pty, cmd, strlen(cmd));
     ASSERT(written > 0, "write 성공");
 
     /* 출력 읽기 */
     ssize_t n = pty_read_timeout(&pty, buf, sizeof(buf), 500);
     ASSERT(n > 0, "read: 데이터 수신");
-    ASSERT(strstr(buf, "TERMEMU_TEST_OK") != NULL, "read: echo 출력 확인");
+    ASSERT(strstr(buf, "TESSERA_TEST_OK") != NULL, "read: echo 출력 확인");
 
     pty_close(&pty, NULL);
 }

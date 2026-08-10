@@ -1,5 +1,5 @@
-#ifndef TERMEMU_GLYPH_ATLAS_H
-#define TERMEMU_GLYPH_ATLAS_H
+#ifndef TESSERA_GLYPH_ATLAS_H
+#define TESSERA_GLYPH_ATLAS_H
 
 /*
  * Glyph atlas — shelf-based bin packer on a single GL_R8 texture.
@@ -53,4 +53,4 @@ int glyph_atlas_insert(glyph_atlas_t *atlas, uint32_t codepoint,
 
 GLuint glyph_atlas_texture(const glyph_atlas_t *atlas);
 
-#endif /* TERMEMU_GLYPH_ATLAS_H */
+#endif /* TESSERA_GLYPH_ATLAS_H */

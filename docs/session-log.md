@@ -25,7 +25,7 @@
 - `config.json` 에 `daemon` 섹션 추가.
 
 #### 3. 크래시 복구 (세션 스냅샷)
-- `~/.config/termemu/sessions/<name>.json` 에 cJSON 기반 스냅샷 저장.
+- `~/.config/tessera/sessions/<name>.json` 에 cJSON 기반 스냅샷 저장.
 - `save_all_sessions()` 를 autosave / shutdown 시 호출.
 - 데몬 시작 시 `ipc_server_restore_sessions()` 가 스냅샷 디렉토리 스캔 → 세션/window/pane 복원 + PTY 재spawn + cwd 복원 (`cd <path>\nclear\n` 주입).
 - 영구 destroy 시 snapshot 파일 삭제.
@@ -80,7 +80,7 @@
 
 ### WSLg 특정 이슈 (미해결, 의도적 보류)
 
-- 증상: 세션 닫은 후 새 termemu 실행 시 간헐적으로 창이 뜨지 않음. 작업표시줄에도 표시 안 됨. Ctrl+C 로 인터럽트 하고 재시도 2~3 번 필요.
+- 증상: 세션 닫은 후 새 tessera 실행 시 간헐적으로 창이 뜨지 않음. 작업표시줄에도 표시 안 됨. Ctrl+C 로 인터럽트 하고 재시도 2~3 번 필요.
 - 진단 로그로 확인: `entering event loop` 까지 정상 도달. 프로세스는 살아있고 이벤트 루프도 돌지만 WM 에 창이 매핑되지 않음.
 - 결론: **WSLg/Weston 컴포지터가 wl_surface commit 을 간헐적으로 놓치는 버그**로 추정. 네이티브 X11/Wayland 에선 재현 가능성 낮음.
 - 시도했다 되돌린 대응:

@@ -1,5 +1,5 @@
-#ifndef TERMEMU_SETTINGS_UI_H
-#define TERMEMU_SETTINGS_UI_H
+#ifndef TESSERA_SETTINGS_UI_H
+#define TESSERA_SETTINGS_UI_H
 
 /*
  * Nuklear 기반 설정 오버레이 UI
@@ -20,10 +20,10 @@ struct nk_context;
  *         -1  Close 요청 (창 닫히기 클릭 또는 Close 버튼)
  */
 int settings_ui_draw(struct nk_context *ctx,
-                      termemu_config_t *cfg,
-                      termemu_theme_t *theme,
+                      tessera_config_t *cfg,
+                      tessera_theme_t *theme,
                       const char *cfg_path,
                       const char *theme_path,
                       float win_w, float win_h);
 
-#endif /* TERMEMU_SETTINGS_UI_H */
+#endif /* TESSERA_SETTINGS_UI_H */

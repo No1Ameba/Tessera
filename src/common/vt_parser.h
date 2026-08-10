@@ -1,5 +1,5 @@
-#ifndef TERMEMU_VT_PARSER_H
-#define TERMEMU_VT_PARSER_H
+#ifndef TESSERA_VT_PARSER_H
+#define TESSERA_VT_PARSER_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -111,4 +111,4 @@ void vt_parser_feed(vt_parser_t *p, const uint8_t *data, size_t len);
 /* 파서를 Ground 상태로 초기화 (PTY 리셋 시 사용). 콜백/컨텍스트는 유지. */
 void vt_parser_reset(vt_parser_t *p);
 
-#endif /* TERMEMU_VT_PARSER_H */
+#endif /* TESSERA_VT_PARSER_H */

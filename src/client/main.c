@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 /*
- * termemu client — GLFW + OpenGL 3.3 Core main loop
+ * tessera client — GLFW + OpenGL 3.3 Core main loop
  *
  * Cross-platform: Linux, macOS, Windows
  *
@@ -65,7 +65,7 @@ static void resize_leaf_cb(layout_node_t *leaf, void *user);
 static volatile int g_running = 1;
 static volatile int g_dirty   = 1;
 
-static const termemu_theme_t *g_theme = NULL;
+static const tessera_theme_t *g_theme = NULL;
 
 static uint32_t       g_session_id    = 0;
 static uint32_t       g_window_id     = 0;
@@ -134,8 +134,8 @@ static char g_last_title[256] = {0};
 /* config/theme 경로 (reload 용) */
 static char g_cfg_path[512]   = {0};
 static char g_theme_path[512] = {0};
-static termemu_config_t *g_cfg_ptr = NULL;
-static termemu_theme_t  *g_theme_mut_ptr = NULL;
+static tessera_config_t *g_cfg_ptr = NULL;
+static tessera_theme_t  *g_theme_mut_ptr = NULL;
 
 /* key_callback에서 처리 완료 시 char_callback 무시 */
 static int g_key_consumed = 0;
@@ -1393,7 +1393,7 @@ static void do_config_reload(void)
     const char *home = getenv("HOME");
     if (g_cfg_ptr->theme_name[0] && home) {
         snprintf(g_theme_path, sizeof(g_theme_path),
-                 "%s/.config/termemu/themes/%s.json",
+                 "%s/.config/tessera/themes/%s.json",
                  home, g_cfg_ptr->theme_name);
         theme_load_file(g_theme_path, g_theme_mut_ptr);
         if (g_theme_mut_ptr->foreground == g_theme_mut_ptr->background)
@@ -1526,19 +1526,19 @@ int main(int argc, char *argv[])
         return 0;
     }
 
-    termemu_config_t cfg = {0};
+    tessera_config_t cfg = {0};
     config_defaults(&cfg);
-    termemu_theme_t  theme = {0};
+    tessera_theme_t  theme = {0};
     theme_defaults(&theme);
 
     const char *home = getenv("HOME");
     if (home) {
-        snprintf(g_cfg_path, sizeof g_cfg_path, "%s/.config/termemu/config.json", home);
+        snprintf(g_cfg_path, sizeof g_cfg_path, "%s/.config/tessera/config.json", home);
         config_load_file(g_cfg_path, &cfg);
 
         if (cfg.theme_name[0]) {
             snprintf(g_theme_path, sizeof g_theme_path,
-                     "%s/.config/termemu/themes/%s.json", home, cfg.theme_name);
+                     "%s/.config/tessera/themes/%s.json", home, cfg.theme_name);
             theme_load_file(g_theme_path, &theme);
         }
     }
@@ -1577,11 +1577,11 @@ int main(int argc, char *argv[])
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
 #endif
 
-    g_window = glfwCreateWindow(g_win_w, g_win_h, "termemu", NULL, NULL);
+    g_window = glfwCreateWindow(g_win_w, g_win_h, "tessera", NULL, NULL);
     if (!g_window) {
         /* transparent framebuffer 미지원 시 폴백 */
         glfwWindowHint(GLFW_TRANSPARENT_FRAMEBUFFER, GLFW_FALSE);
-        g_window = glfwCreateWindow(g_win_w, g_win_h, "termemu", NULL, NULL);
+        g_window = glfwCreateWindow(g_win_w, g_win_h, "tessera", NULL, NULL);
     }
     if (!g_window) {
         fprintf(stderr, "Failed to create GLFW window\n");
@@ -1603,7 +1603,7 @@ int main(int argc, char *argv[])
         glfwTerminate();
         return 1;
     }
-    fprintf(stderr, "[termemu] OpenGL %s\n", gl_version);
+    fprintf(stderr, "[tessera] OpenGL %s\n", gl_version);
     glfwSwapInterval(1);  /* VSync */
 
     /* Opacity — transparent framebuffer 방식 (Wayland 호환) */
@@ -1651,7 +1651,7 @@ int main(int argc, char *argv[])
 
     int connect_ok;
     if (remote_target) {
-        fprintf(stderr, "[termemu] connecting to %s via SSH...\n", remote_target);
+        fprintf(stderr, "[tessera] connecting to %s via SSH...\n", remote_target);
         connect_ok = ipc_client_connect_remote(g_client, remote_target);
     } else {
         connect_ok = ipc_client_connect(g_client);
@@ -1671,7 +1671,7 @@ int main(int argc, char *argv[])
         if (session_snapshot_load(import_path, &snap) != 0) {
             fprintf(stderr, "Failed to load %s\n", import_path); return 1;
         }
-        fprintf(stderr, "[termemu] importing session '%s' (%d windows)\n",
+        fprintf(stderr, "[tessera] importing session '%s' (%d windows)\n",
                 snap.name, snap.window_count);
 
         ipc_client_session_create(g_client, snap.name, &g_session_id);
@@ -1742,7 +1742,7 @@ int main(int argc, char *argv[])
         int sess_count = 0;
         ipc_client_session_list(g_client, sessions, 64, &sess_count);
 
-        fprintf(stderr, "[termemu] %d session(s) found\n", sess_count);
+        fprintf(stderr, "[tessera] %d session(s) found\n", sess_count);
         for (int i = 0; i < sess_count; i++)
             fprintf(stderr, "  [%d] id=%u name='%s'\n",
                     i, sessions[i].session_id, sessions[i].name);
@@ -1755,14 +1755,14 @@ int main(int argc, char *argv[])
             }
         }
         if (!target_sid) {
-            fprintf(stderr, "Session '%s' not found. Is the first termemu still running?\n",
+            fprintf(stderr, "Session '%s' not found. Is the first tessera still running?\n",
                     attach_name);
             return 1;
         }
 
-        fprintf(stderr, "[termemu] attaching to session_id=%u...\n", target_sid);
+        fprintf(stderr, "[tessera] attaching to session_id=%u...\n", target_sid);
         session_attach_setup(target_sid, cols, rows, fw, fh);
-        fprintf(stderr, "[termemu] attached to session '%s'\n", attach_name);
+        fprintf(stderr, "[tessera] attached to session '%s'\n", attach_name);
     } else {
         /* 세션 목록 조회 + 선택 다이얼로그 항상 표시 (원격도 동일) */
         ipc_client_session_list(g_client, g_picker_sessions, 64, &g_picker_count);

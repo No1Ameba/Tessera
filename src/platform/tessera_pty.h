@@ -1,5 +1,5 @@
-#ifndef TERMEMU_PTY_H
-#define TERMEMU_PTY_H
+#ifndef TESSERA_PTY_H
+#define TESSERA_PTY_H
 
 /*
  * PTY 추상화 레이어
@@ -94,4 +94,4 @@ void pty_close(pty_t *pty, int *exit_status);
  */
 int pty_set_nonblocking(int fd);
 
-#endif /* TERMEMU_PTY_H */
+#endif /* TESSERA_PTY_H */

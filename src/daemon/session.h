@@ -1,5 +1,5 @@
-#ifndef TERMEMU_SESSION_H
-#define TERMEMU_SESSION_H
+#ifndef TESSERA_SESSION_H
+#define TESSERA_SESSION_H
 
 /*
  * 세션 관리 — Session / Window / Pane 3계층 트리
@@ -134,4 +134,4 @@ void pane_set_active(window_t *w, pane_t *p);
 /* 페인 크기를 변경한다. */
 void pane_resize(pane_t *p, uint16_t cols, uint16_t rows);
 
-#endif /* TERMEMU_SESSION_H */
+#endif /* TESSERA_SESSION_H */

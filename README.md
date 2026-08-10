@@ -1,4 +1,4 @@
-# termemu
+# tessera
 
 데몬 기반 세션 관리와 GPU 가속 렌더링을 지원하는 크로스 플랫폼 타일링 터미널 에뮬레이터.
 
@@ -17,11 +17,11 @@
 sudo apt install libx11-dev libgl-dev libfreetype-dev libharfbuzz-dev libcjson-dev cmake ninja-build
 
 # 빌드
-cmake -B build -G Ninja -DTERMEMU_BUILD_APPS=ON
+cmake -B build -G Ninja -DTESSERA_BUILD_APPS=ON
 cmake --build build
 
 # 실행 (데몬 자동 스폰)
-./build/src/client/termemu
+./build/src/client/tessera
 ```
 
 ## 문서

@@ -1,5 +1,5 @@
-#ifndef TERMEMU_FILE_PICKER_H
-#define TERMEMU_FILE_PICKER_H
+#ifndef TESSERA_FILE_PICKER_H
+#define TESSERA_FILE_PICKER_H
 
 /*
  * 네이티브 파일 선택 다이얼로그 — zenity / kdialog 외부 프로세스를 popen 으로
@@ -25,4 +25,4 @@ int file_picker_save(char *out_path, size_t out_size,
                       const char *default_name,
                       const char *filter);
 
-#endif /* TERMEMU_FILE_PICKER_H */
+#endif /* TESSERA_FILE_PICKER_H */

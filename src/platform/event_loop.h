@@ -1,5 +1,5 @@
-#ifndef TERMEMU_EVENT_LOOP_H
-#define TERMEMU_EVENT_LOOP_H
+#ifndef TESSERA_EVENT_LOOP_H
+#define TESSERA_EVENT_LOOP_H
 
 /*
  * 이벤트 루프 추상화 — 데몬이 여러 fd(클라이언트 소켓 + PTY 마스터)를 동시에
@@ -46,4 +46,4 @@ int evloop_del(event_loop_t *el, int fd);
  */
 int evloop_wait(event_loop_t *el, ev_ready_t *out, int max, int timeout_ms);
 
-#endif /* TERMEMU_EVENT_LOOP_H */
+#endif /* TESSERA_EVENT_LOOP_H */

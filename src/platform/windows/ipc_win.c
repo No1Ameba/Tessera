@@ -20,7 +20,7 @@
 #include <lmcons.h>   /* UNLEN */
 
 int ipc_socket_path(char *buf, size_t buflen) {
-    /* Windows: 파이프 이름 \\.\pipe\termemu-<username> */
+    /* Windows: 파이프 이름 \\.\pipe\tessera-<username> */
     char user[UNLEN + 1] = "user";
     DWORD n = (DWORD)sizeof user;
     GetUserNameA(user, &n);
