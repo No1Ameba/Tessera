@@ -133,7 +133,7 @@
 3. [x] **Synchronized Output:** `?2026h` — 빠른 출력 시 깜빡임 제거 ✅
 4. [x] **설정 핫 리로드:** inotify로 config.json 변경 감지 → 자동 적용 ✅
 5. [x] **원격 세션 동기화:** SSH 터널 통한 원격 daemon attach (termemu-bridge + PTY 링 버퍼) ✅
-6. [~] **Windows 백엔드:** leaf 구현 착수(branch `feat/windows-backend`, 2026-08-07, **MSVC 미검증**) — `pty_win.c`(ConPTY, PeekNamedPipe 논블로킹 read), `fs_watch_win.c`(ReadDirectoryChangesW, 완성도 높음), `ipc_win.c`(Named Pipe, 골격/placeholder). `termemu_pty.h` 를 `_WIN32` 조건부로 이식성 확보(ssize_t/pty_t). **남은 큰 블로커: 데몬 이벤트 루프가 epoll 기반이라 Windows 는 IOCP 포팅 필요.** 검증 경로: Windows CI 잡(#10) 신설.
+6. [~] **Windows 백엔드:** leaf 구현 착수(branch `feat/windows-backend`, 2026-08-07, **MSVC 미검증**) — `pty_win.c`(ConPTY, PeekNamedPipe 논블로킹 read), `fs_watch_win.c`(ReadDirectoryChangesW, 완성도 높음), `ipc_win.c`(Named Pipe, 골격/placeholder). `termemu_pty.h` 를 `_WIN32` 조건부로 이식성 확보(ssize_t/pty_t). **데몬 이벤트 루프 추상화 완료**(branch `refactor/daemon-eventloop`, 2026-08-10): raw epoll → `platform/event_loop.{h}` 인터페이스(POSIX epoll / Windows IOCP 스켈레톤). `ipc_server.c` 는 `evloop_*` 만 사용, 리눅스 빌드+test_ipc+ASan 통과. → Windows 데몬 블로커가 "`event_loop_win.c` IOCP 어댑터 구현"으로 축소. 검증 경로: Windows CI 잡(#10).
 7. [x] **OSC 8 하이퍼링크:** 클릭 가능한 URL ✅
 8. [ ] **Kitty Image Protocol:** 이미지 인라인 표시
 9. [x] **크래시 복구:** 데몬 상태 저장/복원 ✅

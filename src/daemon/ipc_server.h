@@ -2,7 +2,7 @@
 #define TERMEMU_IPC_SERVER_H
 
 /*
- * IPC 서버 — epoll 기반 이벤트 루프
+ * IPC 서버 — 이벤트 루프 추상화(POSIX: epoll, Windows: IOCP 예정)
  *
  * 클라이언트 연결 수락, ipc_proto.h 메시지 파싱/디스패치,
  * PTY I/O 통합을 담당한다.

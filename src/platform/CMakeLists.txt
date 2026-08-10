@@ -1,11 +1,13 @@
 if(TERMEMU_PLATFORM STREQUAL "windows")
-    set(PTY_SOURCE     windows/pty_win.c)
-    set(IPC_SOURCE     windows/ipc_win.c)
-    set(FSWATCH_SOURCE windows/fs_watch_win.c)
+    set(PTY_SOURCE       windows/pty_win.c)
+    set(IPC_SOURCE       windows/ipc_win.c)
+    set(FSWATCH_SOURCE   windows/fs_watch_win.c)
+    set(EVENTLOOP_SOURCE windows/event_loop_win.c)
 else()
-    set(PTY_SOURCE     posix/pty_posix.c)
-    set(IPC_SOURCE     posix/ipc_posix.c)
-    set(FSWATCH_SOURCE posix/fs_watch_posix.c)
+    set(PTY_SOURCE       posix/pty_posix.c)
+    set(IPC_SOURCE       posix/ipc_posix.c)
+    set(FSWATCH_SOURCE   posix/fs_watch_posix.c)
+    set(EVENTLOOP_SOURCE posix/event_loop_posix.c)
 endif()
 
 # PTY 추상화 — 항상 빌드 (테스트에서 직접 링크 가능)
@@ -19,8 +21,8 @@ if(NOT WIN32)
     target_link_libraries(termemu_pty PRIVATE util)
 endif()
 
-# IPC 소켓 래퍼 — 항상 빌드 (테스트에서 직접 링크 가능)
-add_library(termemu_ipc STATIC ${IPC_SOURCE})
+# IPC 소켓 래퍼 + 이벤트 루프 — 항상 빌드 (테스트에서 직접 링크 가능)
+add_library(termemu_ipc STATIC ${IPC_SOURCE} ${EVENTLOOP_SOURCE})
 
 target_include_directories(termemu_ipc
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}

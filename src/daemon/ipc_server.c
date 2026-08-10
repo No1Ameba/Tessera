@@ -7,6 +7,7 @@
 #include <dirent.h>
 #include "../platform/ipc.h"
 #include "../platform/termemu_pty.h"
+#include "../platform/event_loop.h"
 
 #include <errno.h>
 #include <stdint.h>
@@ -14,7 +15,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <poll.h>
-#include <sys/epoll.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -23,7 +23,7 @@
 
 #define IPC_MAX_CLIENTS   16
 #define IPC_MAX_PANES     64
-#define IPC_EPOLL_EVENTS  32
+#define IPC_LOOP_EVENTS   32   /* evloop_wait 배치 크기 */
 
 /* 세션 수명/자동 저장 기본값 (config 미설정 시). 단위: 초. */
 #define IPC_SERVER_DEFAULT_IDLE_SEC     (5 * 60)
@@ -57,7 +57,7 @@ typedef struct {
 
 struct ipc_server {
     int                 listen_fd;
-    int                 epoll_fd;
+    event_loop_t       *evloop;
     char                sock_path[IPC_SOCKET_PATH_MAX];
     session_manager_t  *session_mgr;
     ipc_client_slot_t   clients[IPC_MAX_CLIENTS];
@@ -186,17 +186,14 @@ static int send_error(int fd, ipc_msg_type_t req_type, ipc_error_code_t code,
     return send_msg(fd, IPC_MSG_ERROR, &err, sizeof(err));
 }
 
-/* ─── 헬퍼: epoll 등록/해제 ──────────────────────────────────────────────── */
+/* ─── 헬퍼: 이벤트 루프 등록/해제 ────────────────────────────────────────── */
 
-static int epoll_add(ipc_server_t *srv, int fd, uint32_t events) {
-    struct epoll_event ev;
-    ev.events  = events;
-    ev.data.fd = fd;
-    return epoll_ctl(srv->epoll_fd, EPOLL_CTL_ADD, fd, &ev);
+static int loop_add(ipc_server_t *srv, int fd, uint32_t interest) {
+    return evloop_add(srv->evloop, fd, interest);
 }
 
-static int epoll_del(ipc_server_t *srv, int fd) {
-    return epoll_ctl(srv->epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+static int loop_del(ipc_server_t *srv, int fd) {
+    return evloop_del(srv->evloop, fd);
 }
 
 /* ─── 메시지 핸들러 ──────────────────────────────────────────────────────── */
@@ -270,7 +267,7 @@ static void handle_session_destroy(ipc_server_t *srv, int client_fd,
         for (pane_t *p = w->panes; p; p = p->next) {
             ipc_pane_slot_t *slot = pane_by_id(srv, p->id);
             if (slot) {
-                epoll_del(srv, slot->pty_fd);
+                loop_del(srv, slot->pty_fd);
                 slot->pty_fd = -1;
             }
         }
@@ -368,7 +365,7 @@ static void handle_window_destroy(ipc_server_t *srv, int client_fd,
     for (pane_t *p = w->panes; p; p = p->next) {
         ipc_pane_slot_t *slot = pane_by_id(srv, p->id);
         if (slot) {
-            epoll_del(srv, slot->pty_fd);
+            loop_del(srv, slot->pty_fd);
             pty_t pty = { .master_fd = slot->pty_fd, .child_pid = (pid_t)p->pid };
             pty_close(&pty, NULL);
             slot->pty_fd = -1;
@@ -498,7 +495,7 @@ static void handle_pane_create(ipc_server_t *srv, int client_fd,
     slot->window_id  = w->id;
 
     /* PTY fd 를 epoll 에 등록 */
-    epoll_add(srv, pty.master_fd, EPOLLIN | EPOLLET);
+    loop_add(srv, pty.master_fd, EV_READ | EV_EDGE);
 
     ipc_payload_pane_created_t resp;
     memset(&resp, 0, sizeof(resp));
@@ -563,7 +560,7 @@ static void handle_pane_destroy(ipc_server_t *srv, int client_fd,
 
     ipc_pane_slot_t *slot = pane_by_id(srv, p->id);
     if (slot) {
-        epoll_del(srv, slot->pty_fd);
+        loop_del(srv, slot->pty_fd);
         pty_t pty = { .master_fd = slot->pty_fd, .child_pid = (pid_t)p->pid };
         pty_close(&pty, NULL);
         slot->pty_fd = -1;
@@ -979,7 +976,7 @@ static void dispatch_message(ipc_server_t *srv, int client_fd,
 static void client_remove(ipc_server_t *srv, ipc_client_slot_t *c) {
     /* 세션 attach 해제 (last_detach_ms 갱신) */
     client_set_session(srv, c, 0);
-    epoll_del(srv, c->fd);
+    loop_del(srv, c->fd);
     close(c->fd);
     c->fd       = -1;
     c->rbuf_len = 0;
@@ -1097,7 +1094,7 @@ static void pty_output_read(ipc_server_t *srv, int pty_fd) {
         }
 
         /* epoll 제거 + pty 닫기 */
-        epoll_del(srv, slot->pty_fd);
+        loop_del(srv, slot->pty_fd);
         pty_close(&pty, NULL);
         slot->pty_fd = -1;
 
@@ -1121,7 +1118,7 @@ ipc_server_t *ipc_server_create(session_manager_t *session_mgr) {
     if (!srv) return NULL;
 
     srv->listen_fd   = -1;
-    srv->epoll_fd    = -1;
+    srv->evloop      = NULL;
     srv->session_mgr = session_mgr;
     srv->running     = 0;
     srv->autosave_interval_sec    = IPC_SERVER_DEFAULT_AUTOSAVE_SEC;
@@ -1145,17 +1142,19 @@ int ipc_server_listen(ipc_server_t *srv) {
     srv->listen_fd = ipc_listen_socket(srv->sock_path);
     if (srv->listen_fd < 0) return -1;
 
-    srv->epoll_fd = epoll_create1(0);
-    if (srv->epoll_fd < 0) {
+    srv->evloop = evloop_create();
+    if (!srv->evloop) {
         ipc_close_socket(srv->listen_fd, srv->sock_path);
         srv->listen_fd = -1;
         return -1;
     }
 
-    if (epoll_add(srv, srv->listen_fd, EPOLLIN) < 0) {
-        close(srv->epoll_fd);
+    /* listen 소켓은 레벨 트리거(EV_READ)로 감시 — accept 루프 단순화. */
+    if (loop_add(srv, srv->listen_fd, EV_READ) < 0) {
+        evloop_destroy(srv->evloop);
         ipc_close_socket(srv->listen_fd, srv->sock_path);
-        srv->listen_fd = srv->epoll_fd = -1;
+        srv->listen_fd = -1;
+        srv->evloop = NULL;
         return -1;
     }
 
@@ -1203,7 +1202,7 @@ static int restore_one_snapshot(ipc_server_t *srv, const session_snapshot_t *sna
             slot->ring_head  = 0;
             slot->ring_count = 0;
 
-            epoll_add(srv, pty.master_fd, EPOLLIN | EPOLLET);
+            loop_add(srv, pty.master_fd, EV_READ | EV_EDGE);
 
             /* cwd 복원: 셸 프롬프트가 준비된 후 cd + clear 주입 */
             if (sp->cwd[0]) {
@@ -1311,20 +1310,20 @@ int ipc_server_restore_sessions(ipc_server_t *srv)
 }
 
 int ipc_server_run(ipc_server_t *srv) {
-    if (!srv || srv->listen_fd < 0 || srv->epoll_fd < 0) return -1;
+    if (!srv || srv->listen_fd < 0 || !srv->evloop) return -1;
 
     srv->running = 1;
-    struct epoll_event events[IPC_EPOLL_EVENTS];
+    ev_ready_t events[IPC_LOOP_EVENTS];
 
     while (srv->running) {
-        int nev = epoll_wait(srv->epoll_fd, events, IPC_EPOLL_EVENTS, 200);
+        int nev = evloop_wait(srv->evloop, events, IPC_LOOP_EVENTS, 200);
         if (nev < 0) {
             if (errno == EINTR) continue;
             return -1;
         }
 
         for (int i = 0; i < nev; i++) {
-            int fd = events[i].data.fd;
+            int fd = events[i].fd;
 
             if (fd == srv->listen_fd) {
                 /* 신규 클라이언트 연결 */
@@ -1340,17 +1339,17 @@ int ipc_server_run(ipc_server_t *srv) {
                 slot->session_id = 0;
                 slot->rbuf_len   = 0;
                 srv->ever_had_client = 1;
-                epoll_add(srv, cfd, EPOLLIN | EPOLLET);
+                loop_add(srv, cfd, EV_READ | EV_EDGE);
 
             } else {
                 /* PTY 또는 클라이언트 I/O. HUP/ERR 도 데이터 drain + EOF 정리 경로로
-                 * 흘려보낸다 — 셸 exit 시 EPOLLHUP 만 오고 EPOLLIN 이 재트리거되지
+                 * 흘려보낸다 — 셸 exit 시 HANGUP 만 오고 READ 가 재트리거되지
                  * 않아 PANE_EXITED 브로드캐스트가 누락되던 버그 수정. */
                 ipc_client_slot_t *c = client_by_fd(srv, fd);
                 if (c) {
-                    if (events[i].events & EPOLLIN)
+                    if (events[i].revents & EV_READ)
                         client_read(srv, c);
-                    if (events[i].events & (EPOLLHUP | EPOLLERR))
+                    if (events[i].revents & (EV_HANGUP | EV_ERROR))
                         client_remove(srv, c);
                 } else {
                     /* PTY fd: pty_output_read 가 pty_read 의 EIO/EAGAIN 를 보고
@@ -1388,7 +1387,7 @@ int ipc_server_run(ipc_server_t *srv) {
                         for (pane_t *p = w->panes; p; p = p->next) {
                             ipc_pane_slot_t *slot = pane_by_id(srv, p->id);
                             if (slot && slot->pty_fd >= 0) {
-                                epoll_del(srv, slot->pty_fd);
+                                loop_del(srv, slot->pty_fd);
                                 pty_t pt = { .master_fd = slot->pty_fd,
                                              .child_pid = (pid_t)p->pid };
                                 pty_close(&pt, NULL);
@@ -1454,7 +1453,7 @@ void ipc_server_destroy(ipc_server_t *srv) {
         }
     }
 
-    if (srv->epoll_fd >= 0)  close(srv->epoll_fd);
+    if (srv->evloop)         { evloop_destroy(srv->evloop); srv->evloop = NULL; }
     if (srv->listen_fd >= 0) ipc_close_socket(srv->listen_fd, srv->sock_path);
 
     free(srv);
