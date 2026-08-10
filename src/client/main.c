@@ -281,6 +281,44 @@ static layout_node_t *find_sibling_leaf(layout_node_t *leaf)
     return sib;
 }
 
+/*
+ * 비어버린 window 를 테이블에서 빼고 이웃 window 로 이동한다.
+ * 남은 window 가 없을 때만 앱을 종료한다.
+ * 호출 전에 해당 window 의 트리는 이미 정리(NULL)돼 있어야 한다.
+ */
+static void drop_window_and_advance(int wi)
+{
+    if (wi < 0 || wi >= g_window_count) return;
+    int was_active = (wi == g_active_window);
+
+    for (int i = wi; i < g_window_count - 1; i++)
+        g_windows[i] = g_windows[i + 1];
+    g_window_count--;
+
+    if (g_window_count == 0) {
+        /* 세션의 마지막 window 였다 — 이제서야 종료 */
+        g_layout        = NULL;
+        g_active_pane   = 0;
+        g_active_window = 0;
+        g_running       = 0;
+        g_dirty         = 1;
+        return;
+    }
+
+    if (was_active) {
+        int next = (wi < g_window_count) ? wi : g_window_count - 1;
+        g_layout        = NULL;   /* 방금 파괴된 트리 참조 제거 */
+        g_active_pane   = 0;
+        g_active_window = -1;     /* window_activate 가 저장 없이 새로 올리도록 */
+        window_activate(next, font_cell_width(g_font), font_cell_height(g_font));
+        if (g_client && g_session_id)
+            ipc_client_window_focus(g_client, g_session_id, g_windows[next].id);
+    } else if (g_active_window > wi) {
+        g_active_window--;        /* 앞쪽이 당겨졌으므로 인덱스 보정 */
+    }
+    g_dirty = 1;
+}
+
 /* 같은 window 안에서 대체 포커스로 삼을 pane 을 고른다 (없으면 0). */
 static void pick_next_pane_cb(layout_node_t *leaf, void *u)
 {
@@ -380,35 +418,8 @@ static void on_pane_exited(uint32_t pane_id, void *user)
      * 예전에는 g_layout 이 비면 무조건 g_running=0 이라, 다른 window 가
      * 남아 있어도 셸에서 exit 한 번에 앱 전체가 닫혔다.
      */
-    for (int i = wi; i < g_window_count - 1; i++)
-        g_windows[i] = g_windows[i + 1];
-    g_window_count--;
-
-    if (g_window_count == 0) {
-        /* 세션의 마지막 window 였다 — 이제서야 종료 */
-        g_layout        = NULL;
-        g_active_pane   = 0;
-        g_active_window = 0;
-        g_running       = 0;
-        g_dirty         = 1;
-        return;
-    }
-
-    /* 남은 window 로 이동. 활성 window 가 사라진 경우에만 전환한다. */
-    if (is_active_win) {
-        int next = (wi < g_window_count) ? wi : g_window_count - 1;
-        g_layout        = NULL;   /* 방금 파괴된 트리 참조 제거 */
-        g_active_pane   = 0;
-        g_active_window = -1;     /* window_activate 가 저장 없이 새로 올리도록 */
-        window_activate(next, fw, fh);
-        if (g_client && g_session_id)
-            ipc_client_window_focus(g_client, g_session_id, g_windows[next].id);
-    } else if (g_active_window > wi) {
-        g_active_window--;        /* 앞쪽이 당겨졌으므로 인덱스 보정 */
-    }
-
-    if (changed) push_layout_to_daemon();
-    g_dirty = 1;
+    (void)changed;
+    drop_window_and_advance(wi);
 }
 
 /* 현재 layout tree 를 직렬화해서 데몬에 업로드한다 (재접속 복원용). */
@@ -453,6 +464,7 @@ static void on_pane_split(uint32_t session_id, uint32_t window_id,
     layout_node_t *r = parent_leaf;
     while (r->parent) r = r->parent;
     g_layout = r;
+    window_save_active();   /* 루트 변경 → 슬롯 동기화 (stale 트리 방지) */
 
     int fw = font_cell_width(g_font);
     int fh = font_cell_height(g_font);
@@ -517,6 +529,7 @@ static void do_split(layout_node_type_t dir)
         layout_node_t *r = cur_leaf;
         while (r->parent) r = r->parent;
         g_layout = r;
+        window_save_active();   /* 루트 변경 → 슬롯 동기화 */
     }
 
     int old_nc = cur_leaf->rect.w / fw; if (old_nc < 1) old_nc = 1;
@@ -563,14 +576,12 @@ static void close_pane_now(void)
         layout_node_t *sib = find_sibling_leaf(node);
         if (sib && sib->pane_id != g_active_pane) next_pane = sib->pane_id;
     }
-    /* 3순위: g_panes 배열 순회 fallback */
+    /* 3순위: 같은 window 의 아무 leaf. pane_slot 배열 전체를 훑으면 다른
+     * window 의 pane 으로 포커스가 튄다. */
     if (!next_pane) {
-        for (int i = 0; i < MAX_PANES; i++) {
-            if (pane_slot_at(i)->used && pane_slot_at(i)->pane_id != g_active_pane) {
-                next_pane = pane_slot_at(i)->pane_id;
-                break;
-            }
-        }
+        struct { uint32_t dying, pick; } pc = { g_active_pane, 0 };
+        layout_each_leaf(g_layout, pick_next_pane_cb, &pc);
+        next_pane = pc.pick;
     }
 
     ipc_client_pane_destroy(g_client, g_session_id, g_window_id, g_active_pane);
@@ -585,17 +596,25 @@ static void close_pane_now(void)
     pane_slot_free(closing_id);
     (void)node;
 
+    /* 루트가 바뀌었을 수 있으므로 window 슬롯에 즉시 반영한다.
+     * 슬롯이 옛 루트를 가리킨 채로 남으면 window 닫기에서 해제된 트리를
+     * 순회하게 된다(세그폴트). */
+    window_save_active();
+
     if (next_pane) {
         g_active_pane = next_pane;
+        window_save_active();
         int fw = font_cell_width(g_font);
         int fh = font_cell_height(g_font);
         resize_ctx_t rctx = { g_client, g_session_id, g_window_id, fw, fh };
         layout_each_leaf(g_layout, resize_leaf_cb, &rctx);
-    } else {
-        g_running = 0;
+        g_dirty = 1;
+        push_layout_to_daemon();
+        return;
     }
-    g_dirty = 1;
-    push_layout_to_daemon();
+
+    /* 이 window 의 마지막 pane 이었다 — 앱을 끄는 대신 window 를 닫는다. */
+    drop_window_and_advance(g_active_window);
 }
 
 /* leaf 개수 카운트 헬퍼 */
@@ -766,40 +785,34 @@ static void close_window_now(void)
 {
     if (g_window_count <= 1) return;
 
-    int idx = g_active_window;
-    client_window_t *cw = &g_windows[idx];
-    uint32_t wid = cw->id;
+    /* split/pane 닫기로 루트가 바뀌었을 수 있다 — 슬롯을 먼저 동기화하지
+     * 않으면 아래에서 해제된 트리를 순회한다(세그폴트). */
+    window_save_active();
 
-    /* 이 window 의 pane 들을 데몬에서 없애고 로컬 슬롯도 해제 */
+    int      idx  = g_active_window;
+    uint32_t wid  = g_windows[idx].id;
+    layout_node_t *tree = g_windows[idx].layout;
+
+    /* 닫을 pane 목록을 트리에서 먼저 뽑아둔다. */
     uint32_t dead[MAX_PANES];
     collect_ctx_t cc = { dead, MAX_PANES, 0 };
-    if (cw->layout) {
-        layout_each_leaf(cw->layout, collect_leaf_cb, &cc);
-        for (int i = 0; i < cc.n; i++) {
-            ipc_client_pane_destroy(g_client, g_session_id, wid, dead[i]);
-            pane_slot_free(dead[i]);
-        }
-        layout_destroy(cw->layout);
-        cw->layout = NULL;
+    if (tree) layout_each_leaf(tree, collect_leaf_cb, &cc);
+
+    /*
+     * 아래 IPC 호출들은 응답을 기다리며 소켓을 펌프하므로 그 사이에
+     * on_pane_exited 등 콜백이 재진입할 수 있다. 테이블에서 이 window 를
+     * 먼저 떼어내고 트리 소유권을 지역 변수로 가져와, 재진입 코드가 이미
+     * 해제 중인 트리를 건드리지 못하게 한다.
+     */
+    g_windows[idx].layout = NULL;
+    layout_destroy(tree);
+    drop_window_and_advance(idx);
+
+    for (int i = 0; i < cc.n; i++) {
+        ipc_client_pane_destroy(g_client, g_session_id, wid, dead[i]);
+        pane_slot_free(dead[i]);
     }
     ipc_client_window_destroy(g_client, g_session_id, wid);
-
-    /* 테이블에서 제거 (뒤를 당김) */
-    for (int i = idx; i < g_window_count - 1; i++)
-        g_windows[i] = g_windows[i + 1];
-    g_window_count--;
-
-    /* 활성 상태를 무효화한 뒤 이웃 window 로 이동 */
-    g_layout      = NULL;
-    g_active_pane = 0;
-    int next = (idx < g_window_count) ? idx : g_window_count - 1;
-    g_active_window = -1;   /* window_activate 가 저장 없이 새로 올리도록 */
-
-    int fw = font_cell_width(g_font);
-    int fh = font_cell_height(g_font);
-    window_activate(next, fw, fh);
-    if (g_client && g_session_id)
-        ipc_client_window_focus(g_client, g_session_id, g_windows[next].id);
 }
 
 static void confirm_close_window_cb(void *user) { (void)user; close_window_now(); }
