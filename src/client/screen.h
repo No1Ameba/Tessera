@@ -21,6 +21,9 @@
 #include "../common/vt_parser.h"
 #include "cell.h"
 
+/* 탭 정지 비트맵 크기. 이보다 넓은 열은 기본 8칸 간격으로 폴백한다. */
+#define SCREEN_TAB_MAX 1024
+
 typedef struct {
     int cols, rows;
     int scrollback_max;    /* 스크롤백 버퍼 최대 줄 수 */
@@ -72,6 +75,12 @@ typedef struct {
     /* 커서 상태 */
     int cursor_hidden;      /* ?25l = 1, ?25h = 0 */
     int cursor_style;       /* DECSCUSR 0=기본..6 */
+
+    /* 탭 정지 (HTS/TBC/HT/CHT/CBT). 1 = 해당 열에 정지. */
+    uint8_t  tab_stops[SCREEN_TAB_MAX];
+
+    /* REP(CSI b) 용: 마지막으로 출력한 그래픽 문자(0 = 없음). */
+    uint32_t last_print_cp;
 
     /* OSC 창 타이틀 */
     char title[256];

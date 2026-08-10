@@ -476,6 +476,59 @@ static void test_cursor_style(void)
 
 /* ══════════════════════════════════════════════════════════════════════════ */
 
+static void test_tab_stops(void)
+{
+    screen_t s;
+    assert(screen_init(&s, 80, 24, 500) == 0);
+
+    /* 기본 탭: 8칸 간격. col 0 → HT → 8 → 16. */
+    feed(&s, "\t");
+    CHECK(s.cx == 8, "HT: 0 -> 8");
+    feed(&s, "\t");
+    CHECK(s.cx == 16, "HT: 8 -> 16");
+
+    /* CBT (CSI Z): 한 탭 뒤로 → 8 */
+    feed(&s, "\x1b[Z");
+    CHECK(s.cx == 8, "CBT: 16 -> 8");
+
+    /* CHT (CSI 2 I): 두 탭 앞으로 → 24 */
+    feed(&s, "\x1b[2I");
+    CHECK(s.cx == 24, "CHT 2: 8 -> 24");
+
+    /* TBC (CSI 3 g): 모든 탭 해제 → HT 는 마지막 열까지 */
+    feed(&s, "\x1b[3g");
+    feed(&s, "\r\t");
+    CHECK(s.cx == s.cols - 1, "TBC 3: no tab -> last col");
+
+    /* HTS (ESC H): col 5 에 탭 설정 → 이후 HT 가 5 에서 멈춤 */
+    feed(&s, "\r\x1b[6G");        /* CR 후 CHA 로 col 5 (1-based 6) */
+    CHECK(s.cx == 5, "CHA: col 5");
+    feed(&s, "\x1bH");            /* HTS at col 5 */
+    feed(&s, "\r\t");
+    CHECK(s.cx == 5, "HTS: HT stops at new tab (5)");
+
+    screen_destroy(&s);
+    printf("[PASS] test_tab_stops\n");
+}
+
+static void test_rep(void)
+{
+    screen_t s;
+    assert(screen_init(&s, 80, 24, 500) == 0);
+
+    /* 'x' 출력 후 REP 3 → 총 4 개의 'x' (col 0..3), 커서 col 4 */
+    feed(&s, "x\x1b[3b");
+    CHECK(cell_at(&s, 0, 0)->codepoint == 'x', "REP: col0 = x");
+    CHECK(cell_at(&s, 1, 0)->codepoint == 'x', "REP: col1 = x");
+    CHECK(cell_at(&s, 2, 0)->codepoint == 'x', "REP: col2 = x");
+    CHECK(cell_at(&s, 3, 0)->codepoint == 'x', "REP: col3 = x");
+    CHECK(s.cx == 4, "REP: cursor col 4");
+    CHECK(cell_at(&s, 4, 0)->codepoint != 'x', "REP: col4 untouched");
+
+    screen_destroy(&s);
+    printf("[PASS] test_rep\n");
+}
+
 int main(void)
 {
     test_basic_print();
@@ -500,6 +553,9 @@ int main(void)
     test_mouse_mode();
     test_bracketed_paste();
     test_cursor_style();
+    /* VT 완성도: 탭 정지 + REP */
+    test_tab_stops();
+    test_rep();
 
     if (failures == 0) {
         printf("\nAll tests passed.\n");

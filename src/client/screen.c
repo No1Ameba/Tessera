@@ -140,6 +140,8 @@ static void newline(screen_t *s)
 
 static void print_char(screen_t *s, uint32_t cp)
 {
+    s->last_print_cp = cp;  /* REP(CSI b) 용 */
+
     /* pending_wrap: 이전에 줄 끝에서 출력하여 다음 문자 대기 상태 */
     if (s->pending_wrap) {
         s->cx = 0;
@@ -415,6 +417,34 @@ static void handle_mode(screen_t *s, const int *p, size_t n,
     }
 }
 
+/* ── 탭 정지 ─────────────────────────────────────────────────────────────── */
+
+static void init_tab_stops(screen_t *s)
+{
+    memset(s->tab_stops, 0, sizeof s->tab_stops);
+    for (int c = 8; c < SCREEN_TAB_MAX; c += 8) s->tab_stops[c] = 1;
+}
+
+/* 열 c 가 탭 정지인가 (SCREEN_TAB_MAX 초과 열은 8칸 간격으로 폴백). */
+static int is_tab_stop(const screen_t *s, int c)
+{
+    return (c < SCREEN_TAB_MAX) ? s->tab_stops[c] : ((c % 8) == 0);
+}
+
+static int next_tab_stop(const screen_t *s, int from)
+{
+    for (int c = from + 1; c < s->cols; c++)
+        if (is_tab_stop(s, c)) return c;
+    return s->cols - 1;
+}
+
+static int prev_tab_stop(const screen_t *s, int from)
+{
+    for (int c = from - 1; c > 0; c--)
+        if (is_tab_stop(s, c)) return c;
+    return 0;
+}
+
 /* ── VT 콜백 ─────────────────────────────────────────────────────────────── */
 
 static void cb_print(void *ctx, uint32_t cp)
@@ -431,12 +461,10 @@ static void cb_execute(void *ctx, uint8_t byte)
         s->pending_wrap = 0;
         if (s->cx > 0) s->cx--;
         break;
-    case 0x09: {       /* HT — 다음 탭 정지 (8칸 단위) */
+    case 0x09:         /* HT — 다음 탭 정지 */
         s->pending_wrap = 0;
-        int next = ((s->cx / 8) + 1) * 8;
-        s->cx = imin(next, s->cols - 1);
+        s->cx = next_tab_stop(s, s->cx);
         break;
-    }
     case 0x0A: /* LF */
     case 0x0B: /* VT */
     case 0x0C: /* FF */
@@ -494,6 +522,26 @@ static void cb_csi(void *ctx,
     case 'S': scroll_up_n(s,   p0 ? p0 : 1); break; /* SU */
     case 'T': scroll_down_n(s, p0 ? p0 : 1); break; /* SD */
     case 'X': erase_chars(s, p0 ? p0 : 1); break;   /* ECH */
+    case 'I': {                                   /* CHT — N 개 앞 탭 */
+        int n = p0 ? p0 : 1;
+        for (int k = 0; k < n; k++) s->cx = next_tab_stop(s, s->cx);
+        break;
+    }
+    case 'Z': {                                   /* CBT — N 개 뒤 탭 */
+        int n = p0 ? p0 : 1;
+        for (int k = 0; k < n; k++) s->cx = prev_tab_stop(s, s->cx);
+        break;
+    }
+    case 'g':                                     /* TBC — 탭 정지 해제 */
+        if (p0 == 3) memset(s->tab_stops, 0, sizeof s->tab_stops);
+        else if (s->cx >= 0 && s->cx < SCREEN_TAB_MAX) s->tab_stops[s->cx] = 0;
+        break;
+    case 'b': {                                   /* REP — 마지막 그래픽 문자 반복 */
+        int n = p0 ? p0 : 1;
+        if (s->last_print_cp)
+            for (int k = 0; k < n; k++) print_char(s, s->last_print_cp);
+        break;
+    }
     case 'd':                                     /* VPA */
         s->cy = iclamp((p0 ? p0 : 1) - 1, 0, s->rows - 1);
         break;
@@ -544,10 +592,15 @@ static void cb_esc(void *ctx,
             else if (s->cy > 0)
                 s->cy--;
             break;
+        case 'H': /* HTS — 현재 열에 탭 정지 설정 */
+            if (s->cx >= 0 && s->cx < SCREEN_TAB_MAX) s->tab_stops[s->cx] = 1;
+            break;
         case 'c': /* RIS — full reset */
             reset_sgr(s);
             s->cx = s->cy = 0;
             s->scroll_top = 0; s->scroll_bot = s->rows - 1;
+            init_tab_stops(s);
+            s->last_print_cp = 0;
             erase_display(s, 2);
             break;
         default:
@@ -745,6 +798,8 @@ int screen_init(screen_t *s, int cols, int rows, int scrollback_lines)
     };
     vt_parser_init(&s->parser, &cbs, s);
 
+    init_tab_stops(s);
+
     return 0;
 
 oom:
@@ -805,6 +860,7 @@ void screen_resize(screen_t *s, int new_cols, int new_rows)
     s->cx = iclamp(s->cx, 0, new_cols - 1);
     s->cy = iclamp(s->cy, 0, new_rows - 1);
     s->pending_wrap = 0;
+    init_tab_stops(s);  /* 폭 변경 시 기본 탭 정지로 리셋 */
 
     /* 스크롤백/뷰 버퍼는 크기가 바뀌면 재할당 */
     if (s->scrollback && new_cols != copy_cols) {
