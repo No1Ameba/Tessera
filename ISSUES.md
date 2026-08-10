@@ -2,6 +2,30 @@
 
 ## Open
 
+### [FEATURE] 포커스(활성 window/pane) 를 클라이언트 간 공유 (2026-08-10 접수, 미착수)
+
+**요청**: 한 클라이언트에서 window 를 전환하거나 pane 포커스를 옮기면, 같은 세션에 붙은 **다른 PC 의 창도 같이 따라오게** 하고 싶다.
+
+**현재 상태**: 데몬은 `session_t.active_window` / `window_t.active_pane` 필드를 이미 갖고 있고 `IPC_MSG_WINDOW_FOCUS(0x23)` / `IPC_MSG_PANE_FOCUS(0x33)` 메시지도 존재한다. 그런데 **핸들러가 상태만 갱신하고 다른 클라이언트에 브로드캐스트하지 않는다.** 즉 배관은 절반 깔려 있고 전파만 빠져 있다. layout(분할 구조)은 이미 공유되지만(`PANE_SPLIT_NOTIFY` + layout blob) 포커스는 클라이언트 로컬이다.
+
+**설계 논점 — 공유가 항상 옳지는 않다**:
+- PROGRESS #18 원안은 "다중 클라이언트 환경에서 window 전환은 **클라이언트별 로컬이 자연스러움**" 이라고 적어뒀다. tmux 도 기본은 클라이언트별 독립(같은 세션에 붙은 두 클라이언트가 서로 다른 window 를 볼 수 있음)이고, 함께 움직이길 원하면 그룹 세션(`tmux new -t`)을 따로 만든다.
+- 반면 요청자의 시나리오는 "여러 PC 에서 같은 화면을 보며 작업" 이라 **미러링이 목적**이다.
+- → **설정으로 가르는 게 맞다**: `sync.focus` (기본값 결정 필요). 켜면 window/pane 포커스가 전 클라이언트에 전파.
+
+**구현 범위 (예상)**:
+- `ipc_proto.h`: `IPC_MSG_FOCUS_NOTIFY` 신설 (session_id/window_id/pane_id) — 또는 기존 WINDOW_FOCUS/PANE_FOCUS 를 D→C 방향으로도 재사용.
+- `ipc_server.c`: `handle_window_focus` / `handle_pane_focus` 가 요청자 제외 브로드캐스트. 데몬의 `active_window`/`active_pane` 를 진실원으로 유지.
+- `ipc_client.c`: focus 콜백 추가(`ipc_client_set_focus_cb`).
+- `main.c`: 콜백에서 `window_switch` / `g_active_pane` 갱신. **주의 — 에코 루프**: 전파받은 focus 를 적용할 때 다시 `ipc_client_window_focus` 를 보내면 무한 왕복이 된다. 적용 중 억제 플래그 필요.
+- `config`: `sync.focus` bool + 설정 UI.
+
+**연관**: 크기는 이미 최소 클램프로 공유됨(2026-08-10). 스크롤백 뷰 위치·선택 영역까지 공유할지는 별도 판단(아마 불필요 — 로컬이 자연스러움).
+
+**우선순위**: 중. 착수는 사용자 지시 후.
+
+---
+
 ### [BUG] 한글 입력/출력 전반 미지원 (2026-04-22, 갱신 2026-04-23)
 
 **증상 (3가지 영역 모두 재현됨)**:
