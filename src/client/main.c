@@ -67,6 +67,30 @@ static volatile int g_dirty   = 1;
 
 static const tessera_theme_t *g_theme = NULL;
 
+/*
+ * 다중 window.
+ *
+ * g_window_id / g_active_pane / g_layout 은 "현재 활성 window" 의 라이브 상태다.
+ * 이 셋을 그대로 두는 이유는 기존 100여 곳의 호출부가 활성 window 만 다루기
+ * 때문 — window 전환 시 g_windows[] 슬롯에 저장했다가 되불러온다
+ * (window_activate 참조).
+ *
+ * 비활성 window 의 pane 도 pane_slot 을 계속 유지하므로 PTY 출력을 놓치지
+ * 않는다. 렌더링만 활성 window 의 layout 트리를 따른다.
+ */
+#define MAX_WINDOWS 32
+
+typedef struct {
+    uint32_t       id;
+    char           name[64];
+    layout_node_t *layout;
+    uint32_t       active_pane;
+} client_window_t;
+
+static client_window_t g_windows[MAX_WINDOWS];
+static int             g_window_count  = 0;
+static int             g_active_window = 0;   /* g_windows 내 인덱스 */
+
 static uint32_t       g_session_id    = 0;
 static uint32_t       g_window_id     = 0;
 static uint32_t       g_active_pane   = 0;
@@ -509,6 +533,195 @@ static int layout_leaf_count(void)
     return n;
 }
 
+/* ── window 전환 ─────────────────────────────────────────────────────────── */
+
+/* 트리의 첫 leaf pane_id 를 집는다 (이미 값이 있으면 유지). */
+static void first_leaf_cb(layout_node_t *leaf, void *u)
+{
+    uint32_t *out = (uint32_t *)u;
+    if (*out == 0) *out = leaf->pane_id;
+}
+
+/* 트리의 모든 leaf pane_id 를 배열로 모은다. */
+typedef struct { uint32_t *ids; int cap; int n; } collect_ctx_t;
+
+static void collect_leaf_cb(layout_node_t *leaf, void *u)
+{
+    collect_ctx_t *c = (collect_ctx_t *)u;
+    if (c->n < c->cap) c->ids[c->n++] = leaf->pane_id;
+}
+
+/* 활성 window 의 라이브 상태(g_layout/g_active_pane)를 슬롯에 되쓴다. */
+static void window_save_active(void)
+{
+    if (g_active_window < 0 || g_active_window >= g_window_count) return;
+    client_window_t *cw = &g_windows[g_active_window];
+    cw->layout      = g_layout;
+    cw->active_pane = g_active_pane;
+}
+
+/*
+ * idx 번째 window 를 활성화한다. 슬롯의 layout 을 라이브 상태로 올린 뒤
+ * 현재 창 크기에 맞춰 재배치하고 각 pane 의 PTY 크기를 갱신한다.
+ */
+static void window_activate(int idx, int fw, int fh)
+{
+    if (idx < 0 || idx >= g_window_count) return;
+
+    client_window_t *cw = &g_windows[idx];
+    g_active_window = idx;
+    g_window_id     = cw->id;
+    g_layout        = cw->layout;
+    g_active_pane   = cw->active_pane;
+
+    /* 활성 pane 이 유실됐으면 첫 leaf 로 되돌린다. */
+    if (g_layout && !layout_find_pane(g_layout, g_active_pane)) {
+        g_active_pane = 0;
+        layout_each_leaf(g_layout, first_leaf_cb, &g_active_pane);
+    }
+
+    if (g_layout) {
+        int lx, ly, lw, lh;
+        compute_layout_rect(&lx, &ly, &lw, &lh);
+        layout_resize_root(g_layout, lx, ly, lw, lh);
+        resize_ctx_t rctx = { g_client, g_session_id, g_window_id, fw, fh };
+        layout_each_leaf(g_layout, resize_leaf_cb, &rctx);
+    }
+    g_dirty = 1;
+}
+
+/* 현재 window 를 저장하고 idx 번째로 전환한다. */
+static void window_switch(int idx)
+{
+    if (idx < 0 || idx >= g_window_count || idx == g_active_window) return;
+    window_save_active();
+    int fw = font_cell_width(g_font);
+    int fh = font_cell_height(g_font);
+    window_activate(idx, fw, fh);
+    if (g_client && g_session_id)
+        ipc_client_window_focus(g_client, g_session_id, g_windows[idx].id);
+}
+
+static void do_window_cycle(int delta)
+{
+    if (g_window_count <= 1) return;
+    int idx = (g_active_window + delta) % g_window_count;
+    if (idx < 0) idx += g_window_count;
+    window_switch(idx);
+}
+
+/* 새 window + 그 안의 첫 pane 을 만들고 즉시 전환한다. */
+static void do_window_new(void)
+{
+    if (!g_client || g_session_id == 0) return;
+    if (g_window_count >= MAX_WINDOWS) return;
+
+    int fw = font_cell_width(g_font);
+    int fh = font_cell_height(g_font);
+    int lx, ly, lw, lh;
+    compute_layout_rect(&lx, &ly, &lw, &lh);
+    int cols = lw / fw; if (cols < 1) cols = 1;
+    int rows = lh / fh; if (rows < 1) rows = 1;
+
+    char name[64];
+    snprintf(name, sizeof name, "%d", g_window_count + 1);
+
+    uint32_t wid = 0;
+    if (ipc_client_window_create(g_client, g_session_id, name, &wid) != 0) return;
+
+    uint32_t pid = 0;
+    if (ipc_client_pane_create(g_client, g_session_id, wid,
+                                (uint16_t)cols, (uint16_t)rows, &pid) != 0) {
+        ipc_client_window_destroy(g_client, g_session_id, wid);
+        return;
+    }
+
+    pane_slot_t *ps = pane_slot_alloc(pid, cols, rows, g_scrollback_lines);
+    if (!ps) {
+        /* pane_slot 이 없으면 화면을 못 그리므로 데몬 쪽도 되돌린다. */
+        ipc_client_pane_destroy(g_client, g_session_id, wid, pid);
+        ipc_client_window_destroy(g_client, g_session_id, wid);
+        return;
+    }
+    screen_apply_theme(&ps->screen, g_theme);
+    screen_set_clipboard_cb(&ps->screen, on_clipboard_set, NULL);
+    screen_set_reply_cb(&ps->screen, on_screen_reply, (void*)(uintptr_t)pid);
+
+    window_save_active();
+
+    client_window_t *cw = &g_windows[g_window_count];
+    cw->id          = wid;
+    cw->layout      = layout_create_leaf(pid, lx, ly, lw, lh);
+    cw->active_pane = pid;
+    snprintf(cw->name, sizeof cw->name, "%s", name);
+    g_window_count++;
+
+    window_activate(g_window_count - 1, fw, fh);
+    ipc_client_window_focus(g_client, g_session_id, wid);
+    push_layout_to_daemon();
+}
+
+/* window 를 닫는다 (그 안의 pane 들도 함께 정리). 마지막 하나는 닫지 않는다. */
+static void close_window_now(void)
+{
+    if (g_window_count <= 1) return;
+
+    int idx = g_active_window;
+    client_window_t *cw = &g_windows[idx];
+    uint32_t wid = cw->id;
+
+    /* 이 window 의 pane 들을 데몬에서 없애고 로컬 슬롯도 해제 */
+    uint32_t dead[MAX_PANES];
+    collect_ctx_t cc = { dead, MAX_PANES, 0 };
+    if (cw->layout) {
+        layout_each_leaf(cw->layout, collect_leaf_cb, &cc);
+        for (int i = 0; i < cc.n; i++) {
+            ipc_client_pane_destroy(g_client, g_session_id, wid, dead[i]);
+            pane_slot_free(dead[i]);
+        }
+        layout_destroy(cw->layout);
+        cw->layout = NULL;
+    }
+    ipc_client_window_destroy(g_client, g_session_id, wid);
+
+    /* 테이블에서 제거 (뒤를 당김) */
+    for (int i = idx; i < g_window_count - 1; i++)
+        g_windows[i] = g_windows[i + 1];
+    g_window_count--;
+
+    /* 활성 상태를 무효화한 뒤 이웃 window 로 이동 */
+    g_layout      = NULL;
+    g_active_pane = 0;
+    int next = (idx < g_window_count) ? idx : g_window_count - 1;
+    g_active_window = -1;   /* window_activate 가 저장 없이 새로 올리도록 */
+
+    int fw = font_cell_width(g_font);
+    int fh = font_cell_height(g_font);
+    window_activate(next, fw, fh);
+    if (g_client && g_session_id)
+        ipc_client_window_focus(g_client, g_session_id, g_windows[next].id);
+}
+
+static void confirm_close_window_cb(void *user) { (void)user; close_window_now(); }
+
+static void do_close_window(void)
+{
+    if (g_window_count <= 1) return;
+    if (g_cfg_ptr && g_cfg_ptr->confirm_close_window) {
+        char body[256];
+        snprintf(body, sizeof body,
+                 "window \"%s\" 의 모든 pane 이 종료됩니다.",
+                 g_windows[g_active_window].name);
+        confirm_dialog_open(CONFIRM_KIND_WINDOW,
+            "Close Window?", body,
+            &g_cfg_ptr->confirm_close_window,
+            confirm_close_window_cb, NULL);
+        g_dirty = 1;
+        return;
+    }
+    close_window_now();
+}
+
 /* confirm 콜백 — 승인 시 실제 닫기 수행 */
 static void confirm_close_pane_cb(void *user)    { (void)user; close_pane_now(); }
 static void confirm_close_session_cb(void *user)
@@ -830,24 +1043,58 @@ static void prune_dead_leaves(layout_node_t **root,
 }
 
 /* 세션 attach: 기존 세션에 연결 + pane_slot + layout 생성 */
+/*
+ * 특정 window 에 속한 pane 들만 추려 layout 트리를 만든다.
+ * blob 이 있으면 그것을 복원하고, 없으면 flat split 으로 폴백한다.
+ */
+static layout_node_t *build_window_layout(const ipc_attach_result_t *ar,
+                                           const ipc_client_win_t *win)
+{
+    layout_node_t *root = NULL;
+
+    if (win->blob_len > 0) {
+        root = layout_deserialize(ar->blobs + win->blob_off, win->blob_len);
+        if (root) prune_dead_leaves(&root, ar->panes, ar->pane_count);
+    }
+    if (root) return root;
+
+    /* 폴백: 이 window 의 pane 들을 순서대로 수평 분할 */
+    int lx, ly, lw, lh;
+    compute_layout_rect(&lx, &ly, &lw, &lh);
+    uint32_t prev = 0;
+    for (int i = 0; i < ar->pane_count; i++) {
+        if (ar->panes[i].window_id != win->window_id) continue;
+        uint32_t pid = ar->panes[i].pane_id;
+        if (!root) {
+            root = layout_create_leaf(pid, lx, ly, lw, lh);
+        } else {
+            layout_node_t *cur = layout_find_pane(root, prev);
+            if (cur) {
+                layout_split(cur, LAYOUT_SPLIT_H, 0.5f, pid);
+                layout_node_t *r = cur;
+                while (r->parent) r = r->parent;
+                root = r;
+            }
+        }
+        prev = pid;
+    }
+    return root;
+}
+
 static void session_attach_setup(uint32_t sid, int cols, int rows, int fw, int fh)
 {
-    ipc_attach_pane_info_t panes[64];
-    int pane_count = 0;
-    uint8_t blob[4096];
-    uint16_t blob_len = 0;
-    if (ipc_client_session_attach_ex(g_client, sid, panes, 64, &pane_count,
-                                      blob, sizeof blob, &blob_len) != 0) {
+    ipc_attach_result_t ar;
+    if (ipc_client_session_attach(g_client, sid, &ar) != 0) {
         fprintf(stderr, "Failed to attach to session\n");
         return;
     }
     g_session_id = sid;
-    if (pane_count > 0) g_window_id = panes[0].window_id;
 
-    /* 1) pane_slot 생성 (모든 pane 에 대해) */
-    for (int i = 0; i < pane_count; i++) {
-        pane_slot_t *ps = pane_slot_alloc(panes[i].pane_id,
-                                           panes[i].cols, panes[i].rows,
+    /* 1) pane_slot 생성 — 비활성 window 의 pane 도 PTY 출력을 계속 받아야
+     *    하므로 세션의 모든 pane 에 대해 만든다. */
+    for (int i = 0; i < ar.pane_count; i++) {
+        pane_slot_t *ps = pane_slot_alloc(ar.panes[i].pane_id,
+                                           ar.panes[i].cols, ar.panes[i].rows,
                                            g_scrollback_lines);
         if (ps) {
             screen_apply_theme(&ps->screen, g_theme);
@@ -856,37 +1103,35 @@ static void session_attach_setup(uint32_t sid, int cols, int rows, int fw, int f
         }
     }
 
-    /* 2) layout 트리 복원: blob 있으면 deserialize, 없으면 flat split fallback */
-    g_layout = NULL;
-    if (blob_len > 0) {
-        g_layout = layout_deserialize(blob, blob_len);
-        if (g_layout) prune_dead_leaves(&g_layout, panes, pane_count);
-    }
-    if (!g_layout && pane_count > 0) {
-        int lx, ly, lw, lh;
-        compute_layout_rect(&lx, &ly, &lw, &lh);
-        g_layout = layout_create_leaf(panes[0].pane_id, lx, ly, lw, lh);
-        for (int i = 1; i < pane_count; i++) {
-            layout_node_t *cur = layout_find_pane(g_layout, panes[i-1].pane_id);
-            if (cur) {
-                layout_split(cur, LAYOUT_SPLIT_H, 0.5f, panes[i].pane_id);
-                layout_node_t *r = cur;
-                while (r->parent) r = r->parent;
-                g_layout = r;
-            }
-        }
-    }
-    if (pane_count > 0) g_active_pane = panes[0].pane_id;
+    /* 2) window 별 layout 트리 복원 */
+    g_window_count  = 0;
+    g_active_window = 0;
+    for (int i = 0; i < ar.window_count && g_window_count < MAX_WINDOWS; i++) {
+        layout_node_t *root = build_window_layout(&ar, &ar.windows[i]);
+        if (!root) continue;   /* pane 이 하나도 없는 window 는 건너뛴다 */
 
-    if (g_layout) {
-        int lx, ly, lw, lh;
-        compute_layout_rect(&lx, &ly, &lw, &lh);
-        layout_resize_root(g_layout, lx, ly, lw, lh);
-        resize_ctx_t rctx = { g_client, g_session_id, g_window_id, fw, fh };
-        layout_each_leaf(g_layout, resize_leaf_cb, &rctx);
+        client_window_t *cw = &g_windows[g_window_count];
+        cw->id = ar.windows[i].window_id;
+        snprintf(cw->name, sizeof cw->name, "%s", ar.windows[i].name);
+        cw->layout = root;
+        /* 활성 pane 은 이 window 의 첫 leaf */
+        cw->active_pane = 0;
+        layout_each_leaf(root, first_leaf_cb, &cw->active_pane);
+
+        if (ar.active_window_id && cw->id == ar.active_window_id)
+            g_active_window = g_window_count;
+        g_window_count++;
     }
-    for (int i = 0; i < pane_count; i++)
-        ipc_client_pane_replay(g_client, panes[i].pane_id);
+
+    if (g_window_count == 0) {
+        fprintf(stderr, "attach: session has no usable window\n");
+        return;
+    }
+
+    window_activate(g_active_window, fw, fh);
+
+    for (int i = 0; i < ar.pane_count; i++)
+        ipc_client_pane_replay(g_client, ar.panes[i].pane_id);
 
     /* 데몬 blob 동기화 (죽은 leaf 가 제거되었을 수 있음) */
     push_layout_to_daemon();
@@ -912,6 +1157,15 @@ static void session_new_setup(const char *name, int cols, int rows)
     int lx, ly, lw, lh;
     compute_layout_rect(&lx, &ly, &lw, &lh);
     g_layout = layout_create_leaf(first_pane, lx, ly, lw, lh);
+
+    /* window 테이블 등록 — 이후 window 추가/전환의 기준점이 된다. */
+    g_window_count  = 1;
+    g_active_window = 0;
+    g_windows[0].id          = g_window_id;
+    g_windows[0].layout      = g_layout;
+    g_windows[0].active_pane = g_active_pane;
+    snprintf(g_windows[0].name, sizeof g_windows[0].name, "1");
+
     push_layout_to_daemon();
 }
 
@@ -1021,6 +1275,27 @@ static void key_callback(GLFWwindow *win, int key, int scancode,
             { do_resize_pane(2); g_key_consumed = 1; return; }
         if (keybind_matches(kb->resize_up,        mod_flags, key))
             { do_resize_pane(3); g_key_consumed = 1; return; }
+
+        /* window(탭) — split 과 마찬가지로 edge-triggered */
+        if (keybind_matches(kb->window_next,      mod_flags, key))
+            { if (is_press) do_window_cycle(1);  g_key_consumed = 1; return; }
+        if (keybind_matches(kb->window_prev,      mod_flags, key))
+            { if (is_press) do_window_cycle(-1); g_key_consumed = 1; return; }
+        if (keybind_matches(kb->window_new,       mod_flags, key))
+            { if (is_press) do_window_new();     g_key_consumed = 1; return; }
+        if (keybind_matches(kb->window_close,     mod_flags, key))
+            { if (is_press) do_close_window();   g_key_consumed = 1; return; }
+
+        /* Ctrl+Alt+1..9 → 해당 번호 window, Ctrl+Alt+0 → 10번째 (고정 바인딩) */
+        if (mod_flags == (INPUT_MOD_CTRL | INPUT_MOD_ALT) &&
+            key >= GLFW_KEY_0 && key <= GLFW_KEY_9) {
+            if (is_press) {
+                int n = (key == GLFW_KEY_0) ? 9 : (key - GLFW_KEY_1);
+                window_switch(n);
+            }
+            g_key_consumed = 1;
+            return;
+        }
 
         if (as) {
             if (keybind_matches(kb->scroll_up,   mod_flags, key)) {
@@ -2039,7 +2314,12 @@ int main(int argc, char *argv[])
     gl_renderer_destroy(g_renderer);
     glyph_atlas_destroy(g_atlas);
     font_face_destroy(g_font);
-    layout_destroy(g_layout);
+    /* window 별 layout 트리를 모두 해제. 활성 window 의 트리는 g_layout 과
+     * 같은 객체이므로 슬롯에 되쓴 뒤 한 번씩만 지운다. */
+    window_save_active();
+    for (int i = 0; i < g_window_count; i++)
+        layout_destroy(g_windows[i].layout);
+    if (g_window_count == 0) layout_destroy(g_layout);
 
     glfwDestroyWindow(g_window);
     glfwTerminate();

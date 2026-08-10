@@ -91,7 +91,8 @@ static int send_msg(int fd, ipc_msg_type_t type,
  */
 static int dispatch_one(ipc_client_t *c,
                          ipc_msg_type_t want,
-                         void *out_payload, size_t out_size)
+                         void *out_payload, size_t out_size,
+                         size_t *out_plen)
 {
     if (c->rbuf_len < sizeof(ipc_msg_header_t)) return -1;
 
@@ -136,6 +137,7 @@ static int dispatch_one(ipc_client_t *c,
     } else if (want && type == (int)want && out_payload && out_size) {
         size_t copy = hdr.payload_len < out_size ? hdr.payload_len : out_size;
         memcpy(out_payload, payload, copy);
+        if (out_plen) *out_plen = copy;
     }
 
     /* Consume the message from rbuf. */
@@ -150,15 +152,17 @@ static int dispatch_one(ipc_client_t *c,
  * Read from socket until we have at least one complete message, or timeout.
  * Returns the message type or -1 on error/timeout.
  */
-static int recv_until(ipc_client_t *c, ipc_msg_type_t want,
-                       void *out_payload, size_t out_size, int timeout_ms)
+static int recv_until_ex(ipc_client_t *c, ipc_msg_type_t want,
+                          void *out_payload, size_t out_size, int timeout_ms,
+                          size_t *out_plen)
 {
     int64_t deadline = now_ms() + timeout_ms;
 
     for (;;) {
         /* Try to dispatch from existing buffer first. */
         int dispatched;
-        while ((dispatched = dispatch_one(c, want, out_payload, out_size)) != -1) {
+        while ((dispatched = dispatch_one(c, want, out_payload, out_size,
+                                          out_plen)) != -1) {
             if (dispatched == (int)want) return dispatched;
             if (dispatched == IPC_MSG_ERROR) return IPC_MSG_ERROR;
         }
@@ -175,6 +179,13 @@ static int recv_until(ipc_client_t *c, ipc_msg_type_t want,
         if (n <= 0) return -1; /* EOF or error */
         c->rbuf_len += (size_t)n;
     }
+}
+
+/* 페이로드 길이가 필요 없는 대다수 호출용 래퍼. */
+static int recv_until(ipc_client_t *c, ipc_msg_type_t want,
+                       void *out_payload, size_t out_size, int timeout_ms)
+{
+    return recv_until_ex(c, want, out_payload, out_size, timeout_ms, NULL);
 }
 
 /* ── On-demand daemon spawn ──────────────────────────────────────────────── */
@@ -539,7 +550,7 @@ int ipc_client_poll(ipc_client_t *c, int timeout_ms)
     /* Dispatch all complete messages. */
     int count = 0;
     int type;
-    while ((type = dispatch_one(c, 0, NULL, 0)) != -1) {
+    while ((type = dispatch_one(c, 0, NULL, 0, NULL)) != -1) {
         (void)type;
         count++;
     }
@@ -620,49 +631,74 @@ int ipc_client_connect_remote(ipc_client_t *c, const char *ssh_target)
 /* ── 세션 attach ─────────────────────────────────────────────────────────── */
 
 int ipc_client_session_attach(ipc_client_t *c, uint32_t session_id,
-                               ipc_attach_pane_info_t *panes_out, int max_panes,
-                               int *out_count)
+                               ipc_attach_result_t *out)
 {
-    return ipc_client_session_attach_ex(c, session_id, panes_out, max_panes,
-                                         out_count, NULL, 0, NULL);
-}
-
-int ipc_client_session_attach_ex(ipc_client_t *c, uint32_t session_id,
-                                  ipc_attach_pane_info_t *panes_out, int max_panes,
-                                  int *out_count,
-                                  uint8_t *blob_buf, size_t blob_buf_size,
-                                  uint16_t *out_blob_len)
-{
-    if (!c || !panes_out || !out_count) return -1;
+    if (!c || !out) return -1;
+    memset(out, 0, sizeof *out);
 
     ipc_payload_session_attach_t req = { .session_id = session_id };
     if (send_msg(write_fd(c), IPC_MSG_SESSION_ATTACH, &req, sizeof req) != 0)
         return -1;
 
     uint8_t buf[IPC_MAX_PAYLOAD_LEN];
-    if (recv_until(c, IPC_MSG_SESSION_ATTACH_R, buf, sizeof buf,
-                    CMD_TIMEOUT_MS) < 0)
+    size_t plen = 0;
+    if (recv_until_ex(c, IPC_MSG_SESSION_ATTACH_R, buf, sizeof buf,
+                      CMD_TIMEOUT_MS, &plen) < 0)
         return -1;
+    if (plen < sizeof(ipc_payload_session_attach_r_t)) return -1;
 
     const ipc_payload_session_attach_r_t *resp =
         (const ipc_payload_session_attach_r_t *)buf;
-    int cnt = (int)resp->pane_count;
-    if (cnt > max_panes) cnt = max_panes;
 
-    const ipc_attach_pane_info_t *arr =
+    out->session_id       = resp->session_id;
+    out->active_window_id = resp->active_window_id;
+    memcpy(out->session_name, resp->session_name, sizeof out->session_name - 1);
+
+    /* 예고된 배열 길이가 실제 페이로드 안에 들어오는지 먼저 검증한다. */
+    size_t pane_sz = (size_t)resp->pane_count   * sizeof(ipc_attach_pane_info_t);
+    size_t win_sz  = (size_t)resp->window_count * sizeof(ipc_attach_window_info_t);
+    if (sizeof(*resp) + pane_sz + win_sz > plen) return -1;
+
+    size_t pane_n = resp->pane_count;
+    size_t win_n  = resp->window_count;
+    if (pane_n > IPC_CLIENT_MAX_ATTACH_PANES) pane_n = IPC_CLIENT_MAX_ATTACH_PANES;
+    if (win_n  > IPC_MAX_WINDOWS)             win_n  = IPC_MAX_WINDOWS;
+
+    const ipc_attach_pane_info_t *parr =
         (const ipc_attach_pane_info_t *)(buf + sizeof(*resp));
-    for (int i = 0; i < cnt; i++)
-        panes_out[i] = arr[i];
-    *out_count = cnt;
+    for (size_t i = 0; i < pane_n; i++) out->panes[i] = parr[i];
+    out->pane_count = (int)pane_n;
 
-    uint16_t bl = resp->layout_blob_len;
-    if (out_blob_len) *out_blob_len = bl;
-    if (blob_buf && bl > 0) {
-        size_t copy = bl < blob_buf_size ? bl : blob_buf_size;
-        const uint8_t *blob_src =
-            buf + sizeof(*resp) + (size_t)resp->pane_count * sizeof(ipc_attach_pane_info_t);
-        memcpy(blob_buf, blob_src, copy);
+    const ipc_attach_window_info_t *warr =
+        (const ipc_attach_window_info_t *)(buf + sizeof(*resp) + pane_sz);
+    const uint8_t *blob_src = buf + sizeof(*resp) + pane_sz + win_sz;
+    size_t blob_avail = plen - (sizeof(*resp) + pane_sz + win_sz);
+
+    /* 원본 커서(src_off)는 어떤 window 를 건너뛰든 항상 예고된 길이만큼
+     * 전진해야 뒤따르는 blob 들의 위치가 어긋나지 않는다. */
+    size_t src_off = 0, dst_off = 0;
+    for (size_t i = 0; i < win_n; i++) {
+        uint16_t bl   = warr[i].blob_len;
+        int      keep = (src_off + bl <= blob_avail) &&
+                        (dst_off + bl <= sizeof out->blobs);
+
+        out->windows[i].window_id = warr[i].window_id;
+        memcpy(out->windows[i].name, warr[i].name, sizeof out->windows[i].name - 1);
+
+        if (keep && bl > 0) {
+            memcpy(out->blobs + dst_off, blob_src + src_off, bl);
+            out->windows[i].blob_off = (uint32_t)dst_off;
+            out->windows[i].blob_len = bl;
+            dst_off += bl;
+        } else {
+            /* 잘린 응답이나 버퍼 초과 → layout 없음으로 강등(클라이언트가 폴백) */
+            out->windows[i].blob_off = (uint32_t)dst_off;
+            out->windows[i].blob_len = 0;
+        }
+        src_off += bl;
     }
+    out->window_count = (int)win_n;
+    out->blobs_len    = (uint32_t)dst_off;
     return 0;
 }
 

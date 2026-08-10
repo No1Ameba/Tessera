@@ -23,7 +23,12 @@
 /* ─── 매직 / 버전 ────────────────────────────────────────────────────────── */
 
 #define IPC_MAGIC   0x544D55  /* "TMU" (3 bytes, little-endian 하위 24 bit) */
-#define IPC_VERSION 1
+/*
+ * 버전 2: SESSION_ATTACH_R 이 세션의 전체 window 목록 + window 별 layout blob 을
+ *         싣도록 확장(다중 window). 모든 메시지 헤더의 상위 8 bit 에 실리므로
+ *         구버전 데몬이 남아 있으면 클라이언트가 desync 로 즉시 거부한다.
+ */
+#define IPC_VERSION 2
 
 /* ─── 메시지 타입 ────────────────────────────────────────────────────────── */
 
@@ -223,15 +228,24 @@ typedef struct {
     uint32_t session_id;
 } ipc_payload_session_attach_t;
 
-/* IPC_MSG_SESSION_ATTACH_R  D→C
- * 페이로드: 이 헤더 + ipc_attach_pane_info_t[pane_count] + layout_blob[layout_blob_len].
- * layout_blob 은 window_id=first_window 의 직렬화된 layout tree. */
+/*
+ * IPC_MSG_SESSION_ATTACH_R  D→C
+ *
+ * 페이로드 레이아웃 (순서대로 연접):
+ *   ipc_payload_session_attach_r_t
+ *   ipc_attach_pane_info_t   [pane_count]
+ *   ipc_attach_window_info_t [window_count]
+ *   layout blob 들 — window_info 배열 순서대로 각 blob_len 바이트씩
+ *
+ * 세션의 모든 window 와 그 layout tree 를 한 번에 전달하므로 클라이언트는
+ * 재접속 시 window 구성 전체를 복원할 수 있다.
+ */
 typedef struct {
     uint32_t session_id;
     uint32_t pane_count;
     char     session_name[64];
-    uint16_t layout_blob_len;  /* 0 = layout 정보 없음 (이전 버전 호환 시 flat split 사용) */
-    uint8_t  reserved[2];
+    uint32_t window_count;
+    uint32_t active_window_id;   /* 0 = 지정 없음 (클라이언트가 첫 window 선택) */
 } ipc_payload_session_attach_r_t;
 
 typedef struct {
@@ -240,6 +254,13 @@ typedef struct {
     uint16_t cols;
     uint16_t rows;
 } ipc_attach_pane_info_t;
+
+typedef struct {
+    uint32_t window_id;
+    char     name[64];         /* WINDOW_NAME_MAX */
+    uint16_t blob_len;         /* 0 = layout 정보 없음 → 클라이언트가 flat split 폴백 */
+    uint8_t  reserved[2];
+} ipc_attach_window_info_t;
 
 /* IPC_MSG_SCREEN_DAMAGE  D→C */
 typedef struct {
@@ -292,5 +313,13 @@ typedef struct {
 
 /* PTY 데이터 단위 최대 크기 (read() 호출 버퍼) */
 #define IPC_PTY_CHUNK_MAX    4096
+
+/* SESSION_ATTACH_R 이 한 번에 실어 보낼 수 있는 window 수 */
+#define IPC_MAX_WINDOWS      32
+
+/* SESSION_ATTACH_R 에 동봉되는 layout blob 들의 합계 상한.
+ * layout tree 는 window 당 수백 바이트 수준이라 넉넉하다. 초과분은 blob_len=0
+ * 으로 내려가고 클라이언트가 flat split 로 폴백한다. */
+#define IPC_ATTACH_BLOB_MAX  8192
 
 #endif /* TESSERA_IPC_PROTO_H */

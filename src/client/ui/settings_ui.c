@@ -302,6 +302,10 @@ static void tab_keybindings(struct nk_context *ctx, tessera_config_t *cfg)
     keybind_row(ctx, "Resize Right:",     kb->resize_right,     sizeof(kb->resize_right));
     keybind_row(ctx, "Resize Up:",        kb->resize_up,        sizeof(kb->resize_up));
     keybind_row(ctx, "Resize Down:",      kb->resize_down,      sizeof(kb->resize_down));
+    keybind_row(ctx, "Window Next:",      kb->window_next,      sizeof(kb->window_next));
+    keybind_row(ctx, "Window Prev:",      kb->window_prev,      sizeof(kb->window_prev));
+    keybind_row(ctx, "New Window:",       kb->window_new,       sizeof(kb->window_new));
+    keybind_row(ctx, "Close Window:",     kb->window_close,     sizeof(kb->window_close));
 }
 
 static void tab_colors(struct nk_context *ctx, tessera_theme_t *theme)

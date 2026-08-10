@@ -343,6 +343,216 @@ static void test_window_pane_create(void) {
     session_manager_destroy(&mgr);
 }
 
+/* 세션 + window/pane 구성 헬퍼 — 성공 시 pane_id 반환, 실패 시 0. */
+static uint32_t make_pane(int cfd, uint32_t sid, uint32_t wid,
+                           uint16_t cols, uint16_t rows) {
+    ipc_msg_header_t hdr;
+    uint8_t buf[512];
+    ipc_payload_pane_create_t preq;
+    memset(&preq, 0, sizeof(preq));
+    preq.session_id = sid;
+    preq.window_id  = wid;
+    preq.cols = cols;
+    preq.rows = rows;
+    client_send(cfd, IPC_MSG_PANE_CREATE, &preq, sizeof(preq));
+    if (client_recv(cfd, &hdr, buf, sizeof(buf), 1000) < 0) return 0;
+    if (hdr.type != IPC_MSG_PANE_CREATED) return 0;
+    return ((ipc_payload_pane_created_t *)buf)->pane_id;
+}
+
+static uint32_t make_window(int cfd, uint32_t sid, const char *name) {
+    ipc_msg_header_t hdr;
+    uint8_t buf[512];
+    ipc_payload_window_create_t wreq;
+    memset(&wreq, 0, sizeof(wreq));
+    wreq.session_id = sid;
+    strncpy(wreq.name, name, sizeof(wreq.name) - 1);
+    client_send(cfd, IPC_MSG_WINDOW_CREATE, &wreq, sizeof(wreq));
+    if (client_recv(cfd, &hdr, buf, sizeof(buf), 1000) < 0) return 0;
+    if (hdr.type != IPC_MSG_WINDOW_CREATED) return 0;
+    return ((ipc_payload_window_created_t *)buf)->window_id;
+}
+
+/* PANE_RESIZE 를 보내고 OK 를 소비한다. */
+static int send_resize(int cfd, uint32_t sid, uint32_t wid, uint32_t pid,
+                        uint16_t cols, uint16_t rows) {
+    ipc_msg_header_t hdr;
+    uint8_t buf[512];
+    ipc_payload_pane_resize_t rreq;
+    memset(&rreq, 0, sizeof(rreq));
+    rreq.session_id = sid;
+    rreq.window_id  = wid;
+    rreq.pane_id    = pid;
+    rreq.cols = cols;
+    rreq.rows = rows;
+    client_send(cfd, IPC_MSG_PANE_RESIZE, &rreq, sizeof(rreq));
+    if (client_recv(cfd, &hdr, buf, sizeof(buf), 1000) < 0) return -1;
+    return hdr.type == IPC_MSG_OK ? 0 : -1;
+}
+
+static void test_attach_multi_window(void) {
+    GROUP("ATTACH_R — 다중 window + layout blob");
+
+    session_manager_t mgr;
+    session_manager_init(&mgr);
+
+    pthread_t tid;
+    server_ctx_t ctx;
+    ipc_server_t *srv = start_test_server(&mgr, &tid, &ctx);
+    ASSERT(srv != NULL, "서버 시작");
+    if (!srv) return;
+
+    char path[IPC_SOCKET_PATH_MAX];
+    ipc_socket_path(path, sizeof(path));
+    int cfd = connect_to(path);
+    ASSERT(cfd >= 0, "연결");
+
+    ipc_msg_header_t hdr;
+    uint8_t buf[IPC_MAX_PAYLOAD_LEN];
+
+    /* 세션 + window 2개, 각 window 에 pane 1개 */
+    ipc_payload_session_create_t sreq;
+    memset(&sreq, 0, sizeof(sreq));
+    strncpy(sreq.name, "multi", sizeof(sreq.name) - 1);
+    client_send(cfd, IPC_MSG_SESSION_CREATE, &sreq, sizeof(sreq));
+    client_recv(cfd, &hdr, buf, sizeof(buf), 1000);
+    uint32_t sid = ((ipc_payload_session_created_t *)buf)->session_id;
+
+    uint32_t w1 = make_window(cfd, sid, "one");
+    uint32_t w2 = make_window(cfd, sid, "two");
+    ASSERT(w1 > 0 && w2 > 0 && w1 != w2, "window 2개 생성");
+
+    uint32_t p1 = make_pane(cfd, sid, w1, 80, 24);
+    uint32_t p2 = make_pane(cfd, sid, w2, 80, 24);
+    ASSERT(p1 > 0 && p2 > 0, "pane 2개 생성");
+
+    /* 각 window 에 서로 다른 layout blob 업로드 */
+    uint8_t lay[sizeof(ipc_payload_window_layout_t) + 8];
+    ipc_payload_window_layout_t *lreq = (ipc_payload_window_layout_t *)lay;
+    memset(lay, 0, sizeof(lay));
+    lreq->session_id = sid;
+    lreq->window_id  = w1;
+    lreq->blob_len   = 4;
+    memcpy(lay + sizeof(*lreq), "AAAA", 4);
+    client_send(cfd, IPC_MSG_WINDOW_LAYOUT, lay, (uint16_t)(sizeof(*lreq) + 4));
+    client_recv(cfd, &hdr, buf, sizeof(buf), 1000);
+
+    memset(lay, 0, sizeof(lay));
+    lreq->session_id = sid;
+    lreq->window_id  = w2;
+    lreq->blob_len   = 6;
+    memcpy(lay + sizeof(*lreq), "BBBBBB", 6);
+    client_send(cfd, IPC_MSG_WINDOW_LAYOUT, lay, (uint16_t)(sizeof(*lreq) + 6));
+    client_recv(cfd, &hdr, buf, sizeof(buf), 1000);
+
+    /* attach → 두 window 와 각자의 blob 이 모두 와야 한다 */
+    ipc_payload_session_attach_t areq = { .session_id = sid };
+    client_send(cfd, IPC_MSG_SESSION_ATTACH, &areq, sizeof(areq));
+    ASSERT(client_recv(cfd, &hdr, buf, sizeof(buf), 1000) == 0, "ATTACH_R 수신");
+    ASSERT(hdr.type == IPC_MSG_SESSION_ATTACH_R, "타입 ATTACH_R");
+
+    const ipc_payload_session_attach_r_t *resp =
+        (const ipc_payload_session_attach_r_t *)buf;
+    ASSERT(resp->pane_count == 2,   "pane_count = 2");
+    ASSERT(resp->window_count == 2, "window_count = 2");
+
+    size_t pane_sz = (size_t)resp->pane_count * sizeof(ipc_attach_pane_info_t);
+    const ipc_attach_window_info_t *warr =
+        (const ipc_attach_window_info_t *)(buf + sizeof(*resp) + pane_sz);
+    size_t win_sz = (size_t)resp->window_count * sizeof(ipc_attach_window_info_t);
+    const uint8_t *blobs = buf + sizeof(*resp) + pane_sz + win_sz;
+
+    ASSERT(warr[0].window_id == w1 && warr[1].window_id == w2,
+           "window 순서 보존");
+    ASSERT(strcmp(warr[0].name, "one") == 0 && strcmp(warr[1].name, "two") == 0,
+           "window 이름 전달");
+    ASSERT(warr[0].blob_len == 4 && warr[1].blob_len == 6,
+           "window 별 blob 길이");
+    ASSERT(memcmp(blobs, "AAAA", 4) == 0, "첫 window blob 내용");
+    ASSERT(memcmp(blobs + 4, "BBBBBB", 6) == 0, "둘째 window blob 이 뒤에 연접");
+
+    /* pane 이 각자 자기 window 에 매핑돼 있어야 한다 */
+    const ipc_attach_pane_info_t *parr =
+        (const ipc_attach_pane_info_t *)(buf + sizeof(*resp));
+    int ok = 0;
+    for (uint32_t i = 0; i < resp->pane_count; i++) {
+        if (parr[i].pane_id == p1 && parr[i].window_id == w1) ok++;
+        if (parr[i].pane_id == p2 && parr[i].window_id == w2) ok++;
+    }
+    ASSERT(ok == 2, "pane→window 매핑 정확");
+
+    close(cfd);
+    ipc_server_shutdown(srv);
+    pthread_join(tid, NULL);
+    ipc_server_destroy(srv);
+    session_manager_destroy(&mgr);
+}
+
+static void test_pane_size_min_clamp(void) {
+    GROUP("PANE_RESIZE — 다중 클라이언트 최소 크기 클램프");
+
+    session_manager_t mgr;
+    session_manager_init(&mgr);
+
+    pthread_t tid;
+    server_ctx_t ctx;
+    ipc_server_t *srv = start_test_server(&mgr, &tid, &ctx);
+    ASSERT(srv != NULL, "서버 시작");
+    if (!srv) return;
+
+    char path[IPC_SOCKET_PATH_MAX];
+    ipc_socket_path(path, sizeof(path));
+
+    int c1 = connect_to(path);
+    ASSERT(c1 >= 0, "클라이언트 1 연결");
+
+    ipc_msg_header_t hdr;
+    uint8_t buf[512];
+
+    ipc_payload_session_create_t sreq;
+    memset(&sreq, 0, sizeof(sreq));
+    strncpy(sreq.name, "clamp", sizeof(sreq.name) - 1);
+    client_send(c1, IPC_MSG_SESSION_CREATE, &sreq, sizeof(sreq));
+    client_recv(c1, &hdr, buf, sizeof(buf), 1000);
+    uint32_t sid = ((ipc_payload_session_created_t *)buf)->session_id;
+    uint32_t wid = make_window(c1, sid, "w");
+    uint32_t pid = make_pane(c1, sid, wid, 80, 24);
+    ASSERT(pid > 0, "pane 생성");
+
+    /* 클라이언트 1: 120x40 요청 → 혼자이므로 그대로 적용 */
+    ASSERT(send_resize(c1, sid, wid, pid, 120, 40) == 0, "c1 resize OK");
+    session_t *s = session_find_by_id(&mgr, sid);
+    window_t  *w = s ? window_find_by_id(s, wid) : NULL;
+    pane_t    *p = w ? pane_find_by_id(w, pid) : NULL;
+    ASSERT(p != NULL, "pane 조회");
+    ASSERT(p && p->cols == 120 && p->rows == 40, "단일 클라이언트: 요청 그대로");
+
+    /* 클라이언트 2 가 더 작은 크기를 요청하면 최소값으로 클램프 */
+    int c2 = connect_to(path);
+    ASSERT(c2 >= 0, "클라이언트 2 연결");
+    ASSERT(send_resize(c2, sid, wid, pid, 80, 24) == 0, "c2 resize OK");
+    ASSERT(p && p->cols == 80 && p->rows == 24, "두 클라이언트: 최소값 적용");
+
+    /* 큰 쪽이 더 키워도 작은 쪽이 남아 있으면 그대로 */
+    ASSERT(send_resize(c1, sid, wid, pid, 200, 60) == 0, "c1 재확대 OK");
+    ASSERT(p && p->cols == 80 && p->rows == 24, "작은 클라이언트가 상한을 유지");
+
+    /* 축은 독립적으로 최소화된다 (c2 가 넓지만 낮은 경우) */
+    ASSERT(send_resize(c2, sid, wid, pid, 300, 10) == 0, "c2 폭↑ 높이↓");
+    ASSERT(p && p->cols == 200 && p->rows == 10, "cols/rows 각각 최소");
+
+    /* 작은 클라이언트가 나가면 남은 클라이언트 크기로 복귀 */
+    close(c2);
+    for (int i = 0; i < 40 && p && p->rows != 60; i++) usleep(25 * 1000);
+    ASSERT(p && p->cols == 200 && p->rows == 60, "detach 후 남은 크기로 복귀");
+
+    close(c1);
+    ipc_server_shutdown(srv);
+    pthread_join(tid, NULL);
+    ipc_server_destroy(srv);
+    session_manager_destroy(&mgr);
+}
+
 static void test_pty_io(void) {
     GROUP("PTY_INPUT → PTY_OUTPUT");
 
@@ -482,6 +692,8 @@ int main(void) {
     test_hello_handshake();
     test_session_create_list();
     test_window_pane_create();
+    test_attach_multi_window();
+    test_pane_size_min_clamp();
     test_pty_io();
     test_error_handling();
 

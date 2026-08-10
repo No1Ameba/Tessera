@@ -193,6 +193,10 @@ void config_defaults(tessera_config_t *cfg) {
     strncpy(kb->resize_right,     "Alt+Shift+l",  sizeof(kb->resize_right) - 1);
     strncpy(kb->resize_up,        "Alt+Shift+k",  sizeof(kb->resize_up) - 1);
     strncpy(kb->resize_down,      "Alt+Shift+j",  sizeof(kb->resize_down) - 1);
+    strncpy(kb->window_next,      "Ctrl+Alt+l",   sizeof(kb->window_next) - 1);
+    strncpy(kb->window_prev,      "Ctrl+Alt+h",   sizeof(kb->window_prev) - 1);
+    strncpy(kb->window_new,       "Ctrl+Alt+n",   sizeof(kb->window_new) - 1);
+    strncpy(kb->window_close,     "Ctrl+Alt+w",   sizeof(kb->window_close) - 1);
 }
 
 /* ─── 설정 파싱 ─────────────────────────────────────────────────────────── */
@@ -336,6 +340,10 @@ bool config_load_string(const char *json, tessera_config_t *cfg) {
         PARSE_KB("resize_right",     resize_right)
         PARSE_KB("resize_up",        resize_up)
         PARSE_KB("resize_down",      resize_down)
+        PARSE_KB("window_next",      window_next)
+        PARSE_KB("window_prev",      window_prev)
+        PARSE_KB("window_new",       window_new)
+        PARSE_KB("window_close",     window_close)
 #undef PARSE_KB
     }
 
@@ -418,6 +426,10 @@ bool config_save_file(const char *path, const tessera_config_t *cfg) {
     cJSON_AddStringToObject(keybindings, "resize_right",     kb->resize_right);
     cJSON_AddStringToObject(keybindings, "resize_up",        kb->resize_up);
     cJSON_AddStringToObject(keybindings, "resize_down",      kb->resize_down);
+    cJSON_AddStringToObject(keybindings, "window_next",      kb->window_next);
+    cJSON_AddStringToObject(keybindings, "window_prev",      kb->window_prev);
+    cJSON_AddStringToObject(keybindings, "window_new",       kb->window_new);
+    cJSON_AddStringToObject(keybindings, "window_close",     kb->window_close);
     cJSON_AddItemToObject(root, "keybindings", keybindings);
 
     char *text = cJSON_Print(root);

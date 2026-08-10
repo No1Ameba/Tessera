@@ -64,6 +64,11 @@ typedef struct {
     char resize_right[64];      /* 기본: Alt+Shift+l */
     char resize_up[64];         /* 기본: Alt+Shift+k */
     char resize_down[64];       /* 기본: Alt+Shift+j */
+    /* window(탭) 전환. 번호 직접 이동(Ctrl+Alt+1..9,0)은 고정 바인딩이다. */
+    char window_next[64];       /* 기본: Ctrl+Alt+l  */
+    char window_prev[64];       /* 기본: Ctrl+Alt+h  */
+    char window_new[64];        /* 기본: Ctrl+Alt+n  */
+    char window_close[64];      /* 기본: Ctrl+Alt+w  */
 } keybindings_t;
 
 /* ─── 설정 ──────────────────────────────────────────────────────────────── */
