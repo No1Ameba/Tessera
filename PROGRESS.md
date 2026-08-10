@@ -124,6 +124,20 @@
 - 우클릭 컨텍스트 메뉴: 고정 `180x250` → 버튼 수 × 행 높이 + 스타일 spacing 기반 동적 계산. 마우스 콜백의 하드코딩 flip 제거, 렌더 시점 clamp 로 일원화.
 - 설정창: 고정 `480x520` → 화면 비율 기반 rect + 탭 내용을 `nk_group` 스크롤로 감싸 리플로우 보장. `settings_ui_draw(..., win_w, win_h)` API 변경.
 
+### VT 완결성 (2026-08-10)
+`src/client/screen.{c,h}` 에 VT100/VT220 표준 시퀀스를 추가 구현. 파서(`vt_parser.c`)는 무변경 — 필요한 중간 바이트(`#`, `$`)를 이미 수집하고 있었다.
+- **탭 정지**: `tab_stops` 비트맵(`SCREEN_TAB_MAX=1024`, 초과 열은 8칸 폴백). HTS(ESC H) / TBC(CSI g) / HT / CHT(CSI I) / CBT(CSI Z).
+- **REP** (CSI b): 마지막 그래픽 문자 N회 반복.
+- **리포트**: DSR(CSI 5n/6n) / CPR / DA 1·2차. `screen_set_reply_cb()` 로 응답 바이트를 키 입력과 같은 경로(client→daemon→PTY stdin)로 되돌린다.
+- **DECOM** (?6): 원점 모드. CUP/HVP/VPA/CPR 이 스크롤 영역 기준 상대 좌표가 되고 커서가 영역 밖으로 못 나간다. 설정/해제 시 커서는 원점으로.
+- **DECAWM** (?7): 자동 개행. 해제 시 줄 끝 칸에서 계속 덮어쓴다(`tput rmam`).
+- **DECALN** (ESC # 8): 화면을 'E' 로 채우고 여백·커서 초기화.
+- **DECRQM** (CSI [?] Ps $ p) → **DECRPM** (`$y`): 위 모드 + ?25/?1000/?1006/?1049/?2004/?2026 상태 보고. 미지원 모드는 0.
+- **DECSC/DECRC 정합성**: 저장 대상을 위치뿐 아니라 SGR 색·속성·DECOM·pending wrap 까지 확장(`screen_cursor_save_t`). 저장 슬롯을 화면별로 분리(메인/대체, xterm 동작) 하고 `?1049` 는 전용 슬롯 사용 → 앱의 DECSC 를 화면 전환이 덮어쓰지 않는다. SCOSC/SCORC(CSI s/u)도 별도 슬롯으로 분리.
+- **DECSTBM**: 잘못된 여백(top ≥ bot)은 시퀀스 전체 무시(기존엔 커서만 홈으로 이동).
+- **RIS** (ESC c): 대체 화면 복귀 + 모든 모드·저장 슬롯까지 초기화하도록 확장.
+- 검증: `tests/test_screen.c` 30 케이스(신규 6개 — origin_mode/decaln/decrqm/save_restore_cursor/autowrap/ris), 전체 9/9 + ASan·UBSan 클린.
+
 ---
 
 ## TODO (우선순위 순)

@@ -476,6 +476,305 @@ static void test_cursor_style(void)
 
 /* ══════════════════════════════════════════════════════════════════════════ */
 
+static void test_tab_stops(void)
+{
+    screen_t s;
+    assert(screen_init(&s, 80, 24, 500) == 0);
+
+    /* 기본 탭: 8칸 간격. col 0 → HT → 8 → 16. */
+    feed(&s, "\t");
+    CHECK(s.cx == 8, "HT: 0 -> 8");
+    feed(&s, "\t");
+    CHECK(s.cx == 16, "HT: 8 -> 16");
+
+    /* CBT (CSI Z): 한 탭 뒤로 → 8 */
+    feed(&s, "\x1b[Z");
+    CHECK(s.cx == 8, "CBT: 16 -> 8");
+
+    /* CHT (CSI 2 I): 두 탭 앞으로 → 24 */
+    feed(&s, "\x1b[2I");
+    CHECK(s.cx == 24, "CHT 2: 8 -> 24");
+
+    /* TBC (CSI 3 g): 모든 탭 해제 → HT 는 마지막 열까지 */
+    feed(&s, "\x1b[3g");
+    feed(&s, "\r\t");
+    CHECK(s.cx == s.cols - 1, "TBC 3: no tab -> last col");
+
+    /* HTS (ESC H): col 5 에 탭 설정 → 이후 HT 가 5 에서 멈춤 */
+    feed(&s, "\r\x1b[6G");        /* CR 후 CHA 로 col 5 (1-based 6) */
+    CHECK(s.cx == 5, "CHA: col 5");
+    feed(&s, "\x1bH");            /* HTS at col 5 */
+    feed(&s, "\r\t");
+    CHECK(s.cx == 5, "HTS: HT stops at new tab (5)");
+
+    screen_destroy(&s);
+    printf("[PASS] test_tab_stops\n");
+}
+
+static void test_rep(void)
+{
+    screen_t s;
+    assert(screen_init(&s, 80, 24, 500) == 0);
+
+    /* 'x' 출력 후 REP 3 → 총 4 개의 'x' (col 0..3), 커서 col 4 */
+    feed(&s, "x\x1b[3b");
+    CHECK(cell_at(&s, 0, 0)->codepoint == 'x', "REP: col0 = x");
+    CHECK(cell_at(&s, 1, 0)->codepoint == 'x', "REP: col1 = x");
+    CHECK(cell_at(&s, 2, 0)->codepoint == 'x', "REP: col2 = x");
+    CHECK(cell_at(&s, 3, 0)->codepoint == 'x', "REP: col3 = x");
+    CHECK(s.cx == 4, "REP: cursor col 4");
+    CHECK(cell_at(&s, 4, 0)->codepoint != 'x', "REP: col4 untouched");
+
+    screen_destroy(&s);
+    printf("[PASS] test_rep\n");
+}
+
+/* 리플라이(DSR/CPR/DA) 캡처용 */
+static char   g_reply[64];
+static void capture_reply(const char *bytes, size_t len, void *user)
+{
+    (void)user;
+    if (len > sizeof g_reply - 1) len = sizeof g_reply - 1;
+    memcpy(g_reply, bytes, len);
+    g_reply[len] = '\0';
+}
+
+static void test_reports(void)
+{
+    screen_t s;
+    assert(screen_init(&s, 80, 24, 500) == 0);
+    screen_set_reply_cb(&s, capture_reply, NULL);
+
+    /* CPR: CUP 로 (row3,col6, 1-based) 이동 후 CSI 6 n → "\x1b[3;6R" */
+    g_reply[0] = 0;
+    feed(&s, "\x1b[3;6H\x1b[6n");
+    CHECK(strcmp(g_reply, "\x1b[3;6R") == 0, "CPR: row3;col6");
+
+    /* DSR 5n → "\x1b[0n" (터미널 정상) */
+    g_reply[0] = 0;
+    feed(&s, "\x1b[5n");
+    CHECK(strcmp(g_reply, "\x1b[0n") == 0, "DSR 5: OK");
+
+    /* 1차 DA: CSI c → "\x1b[?1;2c" */
+    g_reply[0] = 0;
+    feed(&s, "\x1b[c");
+    CHECK(strcmp(g_reply, "\x1b[?1;2c") == 0, "DA1: VT100+AVO");
+
+    /* 2차 DA: CSI > c → "\x1b[>0;10;1c" */
+    g_reply[0] = 0;
+    feed(&s, "\x1b[>c");
+    CHECK(strcmp(g_reply, "\x1b[>0;10;1c") == 0, "DA2: secondary");
+
+    screen_destroy(&s);
+    printf("[PASS] test_reports\n");
+}
+
+static void test_origin_mode(void)
+{
+    screen_t s;
+    assert(screen_init(&s, 20, 10, 100) == 0);
+    screen_set_reply_cb(&s, capture_reply, NULL);
+
+    /* 스크롤 영역 3~8행(1-based) 설정 → 커서는 홈(0,0), DECOM 꺼진 상태 */
+    feed(&s, "\x1b[3;8r");
+    CHECK(s.scroll_top == 2 && s.scroll_bot == 7, "DECSTBM: region 2..7");
+    CHECK(s.cy == 0 && s.cx == 0, "DECSTBM: home (0,0) without DECOM");
+
+    /* DECOM 설정 → 커서가 스크롤 영역 상단으로 */
+    feed(&s, "\x1b[?6h");
+    CHECK(s.cy == 2 && s.cx == 0, "DECOM set: cursor to scroll_top");
+
+    /* CUP 1;1 은 영역 상단(=행 2) 을 가리킨다 */
+    feed(&s, "\x1b[1;1H");
+    CHECK(s.cy == 2, "DECOM: CUP 1;1 -> row 2");
+
+    /* CUP 3;5 → 영역 상단 + 2 = 행 4 */
+    feed(&s, "\x1b[3;5H");
+    CHECK(s.cy == 4 && s.cx == 4, "DECOM: CUP 3;5 -> row 4, col 4");
+
+    /* 영역 밖으로 나가는 이동은 영역 하단에 클램프 */
+    feed(&s, "\x1b[99;1H");
+    CHECK(s.cy == 7, "DECOM: CUP clamped to scroll_bot");
+
+    /* VPA 도 상대 좌표 */
+    feed(&s, "\x1b[2d");
+    CHECK(s.cy == 3, "DECOM: VPA 2 -> row 3");
+
+    /* CPR 은 영역 기준 상대 행을 보고 */
+    g_reply[0] = 0;
+    feed(&s, "\x1b[6n");
+    CHECK(strcmp(g_reply, "\x1b[2;1R") == 0, "DECOM: CPR reports relative row");
+
+    /* DECRQM(?6) → 설정됨(1) */
+    g_reply[0] = 0;
+    feed(&s, "\x1b[?6$p");
+    CHECK(strcmp(g_reply, "\x1b[?6;1$y") == 0, "DECRQM: ?6 set");
+
+    /* DECOM 해제 → 커서 홈, 절대 좌표 복귀 */
+    feed(&s, "\x1b[?6l");
+    CHECK(s.cy == 0 && s.cx == 0, "DECOM reset: cursor home");
+    feed(&s, "\x1b[1;1H");
+    CHECK(s.cy == 0, "no DECOM: CUP 1;1 -> row 0");
+
+    /* 잘못된 여백(top >= bot)은 무시 */
+    feed(&s, "\x1b[5;5H\x1b[8;3r");
+    CHECK(s.scroll_top == 2 && s.scroll_bot == 7, "DECSTBM: invalid range ignored");
+    CHECK(s.cy == 4, "DECSTBM: invalid range leaves cursor");
+
+    screen_destroy(&s);
+    printf("[PASS] test_origin_mode\n");
+}
+
+static void test_decaln(void)
+{
+    screen_t s;
+    assert(screen_init(&s, 20, 10, 100) == 0);
+
+    /* 여백·커서를 흐트러뜨린 뒤 DECALN */
+    feed(&s, "\x1b[3;8r\x1b[5;5Hxyz");
+    feed(&s, "\x1b#8");
+
+    CHECK(cell_at(&s, 0, 0)->codepoint == 'E',   "DECALN: top-left = E");
+    CHECK(cell_at(&s, 19, 9)->codepoint == 'E',  "DECALN: bottom-right = E");
+    CHECK(cell_at(&s, 7, 4)->codepoint == 'E',   "DECALN: overwrote old text");
+    CHECK(s.cx == 0 && s.cy == 0,                "DECALN: cursor home");
+    CHECK(s.scroll_top == 0 && s.scroll_bot == 9, "DECALN: margins reset");
+
+    screen_destroy(&s);
+    printf("[PASS] test_decaln\n");
+}
+
+static void test_decrqm(void)
+{
+    screen_t s;
+    assert(screen_init(&s, 20, 10, 100) == 0);
+    screen_set_reply_cb(&s, capture_reply, NULL);
+
+    /* 기본값: DECAWM 설정됨, 브라켓 페이스트 해제됨 */
+    g_reply[0] = 0;
+    feed(&s, "\x1b[?7$p");
+    CHECK(strcmp(g_reply, "\x1b[?7;1$y") == 0, "DECRQM: ?7 set by default");
+
+    g_reply[0] = 0;
+    feed(&s, "\x1b[?2004$p");
+    CHECK(strcmp(g_reply, "\x1b[?2004;2$y") == 0, "DECRQM: ?2004 reset");
+
+    /* 켠 뒤 다시 조회 */
+    feed(&s, "\x1b[?2004h");
+    g_reply[0] = 0;
+    feed(&s, "\x1b[?2004$p");
+    CHECK(strcmp(g_reply, "\x1b[?2004;1$y") == 0, "DECRQM: ?2004 set after enable");
+
+    /* DECTCEM 은 역논리 — 커서 숨기면 '해제됨' */
+    feed(&s, "\x1b[?25l");
+    g_reply[0] = 0;
+    feed(&s, "\x1b[?25$p");
+    CHECK(strcmp(g_reply, "\x1b[?25;2$y") == 0, "DECRQM: ?25 reset when hidden");
+
+    /* 모르는 모드 → 0 (미지원) */
+    g_reply[0] = 0;
+    feed(&s, "\x1b[?9999$p");
+    CHECK(strcmp(g_reply, "\x1b[?9999;0$y") == 0, "DECRQM: unknown -> 0");
+
+    /* ANSI 모드(private 아님)도 형식은 유지하되 미지원 보고 */
+    g_reply[0] = 0;
+    feed(&s, "\x1b[4$p");
+    CHECK(strcmp(g_reply, "\x1b[4;0$y") == 0, "DECRQM: ANSI mode -> 0");
+
+    screen_destroy(&s);
+    printf("[PASS] test_decrqm\n");
+}
+
+static void test_save_restore_cursor(void)
+{
+    screen_t s;
+    assert(screen_init(&s, 20, 10, 100) == 0);
+
+    /* DECSC 가 SGR 속성과 DECOM 까지 저장하는지 */
+    feed(&s, "\x1b[3;8r\x1b[?6h");         /* 영역 2..7 + 원점 모드 */
+    feed(&s, "\x1b[1;31m");                 /* bold + red */
+    feed(&s, "\x1b[2;5H");                  /* 영역 기준 2행 → 실제 행 3 */
+    feed(&s, "\x1b" "7");                   /* DECSC */
+
+    /* 상태를 모두 흐트러뜨린다 */
+    feed(&s, "\x1b[?6l\x1b[0m\x1b[9;1H");
+    CHECK(s.origin_mode == 0, "DECSC: origin cleared before restore");
+
+    feed(&s, "\x1b" "8");                   /* DECRC */
+    CHECK(s.cy == 3 && s.cx == 4, "DECRC: position restored");
+    CHECK(s.origin_mode == 1,     "DECRC: origin mode restored");
+    CHECK(s.attrs & CELL_ATTR_BOLD, "DECRC: bold attr restored");
+    feed(&s, "A");
+    CHECK(cell_at(&s, 4, 3)->fg_r == s.ansi_palette[1][0] &&
+          cell_at(&s, 4, 3)->fg_g == s.ansi_palette[1][1] &&
+          cell_at(&s, 4, 3)->fg_b == s.ansi_palette[1][2],
+          "DECRC: fg color restored (red)");
+
+    /* SCOSC/SCORC(CSI s/u) 는 DECSC 슬롯과 독립 */
+    feed(&s, "\x1b[?6l\x1b[1;1H");
+    feed(&s, "\x1b[5;7H\x1b[s");            /* SCOSC at (4,6) */
+    feed(&s, "\x1b" "7");                   /* DECSC at (4,6) */
+    feed(&s, "\x1b[1;1H\x1b[u");            /* SCORC */
+    CHECK(s.cy == 4 && s.cx == 6, "SCORC: restores its own slot");
+
+    /* 대체 화면은 DECSC 슬롯이 분리돼 있어야 한다 */
+    feed(&s, "\x1b[2;3H\x1b" "7");          /* 메인 슬롯 = (1,2) */
+    feed(&s, "\x1b[?1049h");                /* alt 진입 */
+    feed(&s, "\x1b[7;9H\x1b" "7");          /* alt 슬롯 = (6,8) */
+    feed(&s, "\x1b[1;1H\x1b" "8");
+    CHECK(s.cy == 6 && s.cx == 8, "DECSC: alt screen has its own slot");
+    feed(&s, "\x1b[?1049l");                /* 메인 복귀 — 진입 시점 커서로 */
+    feed(&s, "\x1b[1;1H\x1b" "8");
+    CHECK(s.cy == 1 && s.cx == 2, "DECSC: main slot untouched by alt");
+
+    screen_destroy(&s);
+    printf("[PASS] test_save_restore_cursor\n");
+}
+
+static void test_autowrap(void)
+{
+    screen_t s;
+    assert(screen_init(&s, 5, 3, 100) == 0);
+
+    /* DECAWM 해제 → 마지막 칸에서 계속 덮어쓰기 */
+    feed(&s, "\x1b[?7l");
+    feed(&s, "abcdefg");
+    CHECK(cell_at(&s, 4, 0)->codepoint == 'g', "DECAWM off: last col overwritten");
+    CHECK(s.cy == 0 && s.cx == 4, "DECAWM off: cursor stays on row 0");
+    CHECK(cell_at(&s, 0, 1)->codepoint != 'f', "DECAWM off: no wrap to row 1");
+
+    /* 다시 켜면 랩 동작 복귀 */
+    feed(&s, "\x1b[2J\x1b[H\x1b[?7h");
+    feed(&s, "abcdef");
+    CHECK(cell_at(&s, 0, 1)->codepoint == 'f', "DECAWM on: wraps to next row");
+
+    screen_destroy(&s);
+    printf("[PASS] test_autowrap\n");
+}
+
+static void test_ris(void)
+{
+    screen_t s;
+    assert(screen_init(&s, 20, 10, 100) == 0);
+
+    /* 온갖 모드를 켜고 대체 화면으로 간 뒤 RIS */
+    feed(&s, "\x1b[?1049h\x1b[?6h\x1b[?7l\x1b[?25l\x1b[?2004h\x1b[3;8r\x1b[1;31mxx");
+    feed(&s, "\x1b" "c");
+
+    CHECK(s.use_alt == 0,         "RIS: back to main screen");
+    CHECK(s.origin_mode == 0,     "RIS: DECOM cleared");
+    CHECK(s.autowrap == 1,        "RIS: DECAWM restored");
+    CHECK(s.cursor_hidden == 0,   "RIS: cursor visible");
+    CHECK(s.bracketed_paste == 0, "RIS: bracketed paste cleared");
+    CHECK(s.scroll_top == 0 && s.scroll_bot == 9, "RIS: margins reset");
+    CHECK(s.cx == 0 && s.cy == 0, "RIS: cursor home");
+    CHECK(s.attrs == 0,           "RIS: SGR reset");
+    CHECK(cell_at(&s, 0, 0)->codepoint == 0, "RIS: screen cleared");
+
+    screen_destroy(&s);
+    printf("[PASS] test_ris\n");
+}
+
 int main(void)
 {
     test_basic_print();
@@ -500,6 +799,17 @@ int main(void)
     test_mouse_mode();
     test_bracketed_paste();
     test_cursor_style();
+    /* VT 완성도: 탭 정지 + REP + 리포트(DSR/CPR/DA) */
+    test_tab_stops();
+    test_rep();
+    test_reports();
+    /* VT 완성도: 원점 모드 / 정렬 테스트 / 모드 조회 / 커서 저장 / 자동 개행 / RIS */
+    test_origin_mode();
+    test_decaln();
+    test_decrqm();
+    test_save_restore_cursor();
+    test_autowrap();
+    test_ris();
 
     if (failures == 0) {
         printf("\nAll tests passed.\n");

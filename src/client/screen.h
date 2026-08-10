@@ -21,6 +21,22 @@
 #include "../common/vt_parser.h"
 #include "cell.h"
 
+/* 탭 정지 비트맵 크기. 이보다 넓은 열은 기본 8칸 간격으로 폴백한다. */
+#define SCREEN_TAB_MAX 1024
+
+/*
+ * DECSC(ESC 7)/DECRC(ESC 8) 로 저장·복원되는 커서 상태 묶음.
+ * DEC 스펙상 위치뿐 아니라 SGR 속성·원점 모드(DECOM)·wrap 대기 플래그까지 포함한다.
+ */
+typedef struct {
+    int     cx, cy;
+    uint8_t fg_r, fg_g, fg_b;
+    uint8_t bg_r, bg_g, bg_b;
+    uint8_t attrs;
+    int     origin_mode;
+    int     pending_wrap;
+} screen_cursor_save_t;
+
 typedef struct {
     int cols, rows;
     int scrollback_max;    /* 스크롤백 버퍼 최대 줄 수 */
@@ -31,8 +47,8 @@ typedef struct {
     term_cell_t *alt_cells;   /* 대체 화면 */
     int          use_alt;
 
-    /* 메인 화면으로 돌아올 때 복원할 커서 */
-    int main_cx, main_cy;
+    /* ?1049 로 대체 화면에 진입할 때 저장해 둔 메인 화면 커서 상태 */
+    screen_cursor_save_t saved_1049;
 
     /* 스크롤백 링 버퍼 [scrollback_max * cols] */
     term_cell_t *scrollback;
@@ -51,7 +67,12 @@ typedef struct {
 
     /* 커서 */
     int cx, cy;
-    int saved_cx, saved_cy;
+
+    /* SCOSC/SCORC (CSI s / CSI u) — ANSI.SYS 계열, 위치만 저장한다. */
+    int sco_cx, sco_cy;
+
+    /* DECSC/DECRC 저장 슬롯 — 화면별로 하나씩([0]=메인, [1]=대체, xterm 동작). */
+    screen_cursor_save_t saved[2];
 
     /* 스크롤 영역 (0-based, inclusive) */
     int scroll_top, scroll_bot;
@@ -64,6 +85,11 @@ typedef struct {
     /* 줄 끝 자동 개행 대기 플래그 */
     int pending_wrap;
 
+    /* DECOM(?6) — 커서 원점이 스크롤 영역 상단. CUP/HVP/VPA/CPR 이 상대 좌표가 된다. */
+    int origin_mode;
+    /* DECAWM(?7) — 줄 끝 자동 개행 (기본 1). 0 이면 마지막 칸에 덮어쓴다. */
+    int autowrap;
+
     /* 마우스 추적 모드 */
     int mouse_mode;         /* SCREEN_MOUSE_NONE / X10 / SGR */
     int bracketed_paste;    /* ?2004h = 1, ?2004l = 0 */
@@ -72,6 +98,12 @@ typedef struct {
     /* 커서 상태 */
     int cursor_hidden;      /* ?25l = 1, ?25h = 0 */
     int cursor_style;       /* DECSCUSR 0=기본..6 */
+
+    /* 탭 정지 (HTS/TBC/HT/CHT/CBT). 1 = 해당 열에 정지. */
+    uint8_t  tab_stops[SCREEN_TAB_MAX];
+
+    /* REP(CSI b) 용: 마지막으로 출력한 그래픽 문자(0 = 없음). */
+    uint32_t last_print_cp;
 
     /* OSC 창 타이틀 */
     char title[256];
@@ -84,6 +116,11 @@ typedef struct {
     /* OSC 52 클립보드 콜백 */
     void (*clipboard_cb)(const char *text, void *user);
     void  *clipboard_user;
+
+    /* 리플라이 콜백 — DSR/CPR/DA 등 터미널이 앱에 되돌려 보내는 바이트를
+     * PTY stdin 으로 전달한다(키 입력과 동일 경로). */
+    void (*reply_cb)(const char *bytes, size_t len, void *user);
+    void  *reply_user;
 
     /* OSC 8 하이퍼링크 테이블 */
     struct {
@@ -207,6 +244,14 @@ void screen_update_palette(screen_t *s, const tessera_theme_t *t);
 void screen_set_clipboard_cb(screen_t *s,
                               void (*cb)(const char *text, void *user),
                               void *user);
+
+/*
+ * 리플라이 콜백 설정 — DSR/CPR/DA 응답 바이트를 PTY stdin 으로 전달할 함수.
+ * 미설정 시 해당 질의는 조용히 무시된다.
+ */
+void screen_set_reply_cb(screen_t *s,
+                          void (*cb)(const char *bytes, size_t len, void *user),
+                          void *user);
 
 /* link_id 로 저장된 URL 을 조회한다. 없으면 NULL. */
 const char *screen_link_url(const screen_t *s, uint16_t link_id);

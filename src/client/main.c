@@ -202,6 +202,15 @@ static void on_clipboard_set(const char *text, void *user)
         glfwSetClipboardString(g_window, text);
 }
 
+/* DSR/CPR/DA 등 터미널 리플라이를 해당 pane 의 PTY stdin 으로 전달(키 입력과 동일
+ * 경로). user = pane_id (uintptr_t 캐스트). */
+static void on_screen_reply(const char *bytes, size_t len, void *user)
+{
+    uint32_t pane_id = (uint32_t)(uintptr_t)user;
+    if (g_client && pane_id && bytes && len)
+        ipc_client_pty_input(g_client, pane_id, (const uint8_t *)bytes, len);
+}
+
 static void on_pty_output(uint32_t pane_id, const uint8_t *data, size_t len,
                            void *user)
 {
@@ -352,6 +361,7 @@ static void on_pane_split(uint32_t session_id, uint32_t window_id,
         ns->parent_pane_id = parent_pane_id;
         if (g_theme) screen_apply_theme(&ns->screen, g_theme);
         screen_set_clipboard_cb(&ns->screen, on_clipboard_set, NULL);
+        screen_set_reply_cb(&ns->screen, on_screen_reply, (void*)(uintptr_t)ns->pane_id);
     }
 
     /* 부모 pane의 클라이언트 측 screen도 새로운 크기로 리사이즈 */
@@ -421,6 +431,7 @@ static void do_split(layout_node_type_t dir)
             ns->parent_pane_id = g_active_pane;
             if (g_theme) screen_apply_theme(&ns->screen, g_theme);
             screen_set_clipboard_cb(&ns->screen, on_clipboard_set, NULL);
+            screen_set_reply_cb(&ns->screen, on_screen_reply, (void*)(uintptr_t)ns->pane_id);
         }
     }
     g_active_pane = new_pane_id;
@@ -841,6 +852,7 @@ static void session_attach_setup(uint32_t sid, int cols, int rows, int fw, int f
         if (ps) {
             screen_apply_theme(&ps->screen, g_theme);
             screen_set_clipboard_cb(&ps->screen, on_clipboard_set, NULL);
+            screen_set_reply_cb(&ps->screen, on_screen_reply, (void*)(uintptr_t)ps->pane_id);
         }
     }
 
@@ -894,6 +906,7 @@ static void session_new_setup(const char *name, int cols, int rows)
     if (first_slot) {
         screen_apply_theme(&first_slot->screen, g_theme);
         screen_set_clipboard_cb(&first_slot->screen, on_clipboard_set, NULL);
+        screen_set_reply_cb(&first_slot->screen, on_screen_reply, (void*)(uintptr_t)first_slot->pane_id);
     }
     g_active_pane = first_pane;
     int lx, ly, lw, lh;
@@ -1694,6 +1707,7 @@ int main(int argc, char *argv[])
                 if (ps) {
                     screen_apply_theme(&ps->screen, g_theme);
                     screen_set_clipboard_cb(&ps->screen, on_clipboard_set, NULL);
+                    screen_set_reply_cb(&ps->screen, on_screen_reply, (void*)(uintptr_t)ps->pane_id);
                 }
 
                 /* cwd가 있으면 cd 명령 전송 */
