@@ -80,6 +80,36 @@ void ipc_close_socket(int fd, const char *path) {
     }
 }
 
+/* ─── 클라이언트 연결 ───────────────────────────────────────────────────── */
+
+int ipc_connect(const char *path) {
+    if (!path) { errno = EINVAL; return -1; }
+
+    /* 서버 인스턴스가 overlapped 이므로 클라이언트도 맞춰서 연다
+     * (ipc_read/ipc_write 가 OVERLAPPED 로 동작한다). */
+    HANDLE h = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                           OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        errno = (GetLastError() == ERROR_FILE_NOT_FOUND) ? ENOENT : EIO;
+        return -1;
+    }
+    int fd = _open_osfhandle((intptr_t)h, _O_RDWR);
+    if (fd < 0) { CloseHandle(h); errno = EMFILE; return -1; }
+    return fd;
+}
+
+int ipc_wait_ready(const char *path, int timeout_ms) {
+    if (!path) { errno = EINVAL; return -1; }
+    /* 파이프 인스턴스가 생길 때까지 기다린다. WaitNamedPipe 는 파이프가 아직
+     * 아예 없으면 즉시 실패하므로, 존재 여부를 폴링하며 재시도한다. */
+    for (int waited = 0; timeout_ms < 0 || waited < timeout_ms; waited += 50) {
+        if (WaitNamedPipeA(path, 50)) return 1;
+        if (GetLastError() != ERROR_FILE_NOT_FOUND) return 1;  /* 있으나 바쁨 */
+        Sleep(50);
+    }
+    return 0;
+}
+
 /* ─── 연결 I/O ──────────────────────────────────────────────────────────── */
 
 /*
@@ -199,6 +229,29 @@ int ipc_wait_writable(int fd, int timeout_ms) {
     (void)fd; (void)timeout_ms;
     /* 실제 대기는 ipc_write 내부의 overlapped 완료 대기에서 이뤄진다. */
     return 1;
+}
+
+int ipc_wait_readable(int fd, int timeout_ms) {
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    if (h == INVALID_HANDLE_VALUE) { errno = EBADF; return -1; }
+
+    /* 파이프는 데이터 도착으로 신호되지 않으므로 WaitForSingleObject 를 쓸 수 없다.
+     * 데몬(event_loop_win.c)은 IOCP 를 쓰지만, 클라이언트는 IOCP 를 두지 않는
+     * 단순한 요청/응답 경로라 짧은 주기 폴링으로 충분하다.
+     * TODO: 클라이언트도 IOCP 로 옮기면 이 폴링을 없앨 수 있다. */
+    for (int waited = 0; timeout_ms < 0 || waited < timeout_ms; waited++) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL)) {
+            DWORD err = GetLastError();
+            if (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED)
+                return 1;      /* EOF 도 "읽을 수 있음" — 호출자가 0 을 받는다 */
+            errno = EIO;
+            return -1;
+        }
+        if (avail > 0) return 1;
+        Sleep(1);
+    }
+    return 0;
 }
 
 void ipc_close_conn(int fd) {

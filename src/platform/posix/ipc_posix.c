@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <time.h>      /* nanosleep — ipc_wait_ready */
 #include <unistd.h>
 
 /* ─── 소켓 경로 ──────────────────────────────────────────────────────────── */
@@ -100,6 +101,40 @@ void ipc_close_socket(int fd, const char *path) {
         unlink(path);
 }
 
+/* ─── 클라이언트 연결 ───────────────────────────────────────────────────── */
+
+int ipc_connect(const char *path) {
+    if (!path) { errno = EINVAL; return -1; }
+
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof addr.sun_path - 1);
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof addr) < 0) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+    return fd;
+}
+
+int ipc_wait_ready(const char *path, int timeout_ms) {
+    if (!path) { errno = EINVAL; return -1; }
+    /* 소켓 파일이 나타나면 준비된 것으로 본다. */
+    for (int waited = 0; timeout_ms < 0 || waited < timeout_ms; waited += 50) {
+        struct stat st;
+        if (stat(path, &st) == 0) return 1;
+        struct timespec ts = { 0, 50 * 1000 * 1000L };
+        nanosleep(&ts, NULL);
+    }
+    return 0;
+}
+
 /* ─── 연결 I/O ──────────────────────────────────────────────────────────── */
 
 /* POSIX 에서는 fd 가 이미 O_NONBLOCK 이므로 그대로 얇게 감싸기만 한다. */
@@ -114,6 +149,13 @@ ssize_t ipc_write(int fd, const void *buf, size_t len) {
 
 int ipc_wait_writable(int fd, int timeout_ms) {
     struct pollfd pf = { fd, POLLOUT, 0 };
+    int r = poll(&pf, 1, timeout_ms);
+    if (r < 0) return -1;
+    return r == 0 ? 0 : 1;
+}
+
+int ipc_wait_readable(int fd, int timeout_ms) {
+    struct pollfd pf = { fd, POLLIN, 0 };
     int r = poll(&pf, 1, timeout_ms);
     if (r < 0) return -1;
     return r == 0 ? 0 : 1;

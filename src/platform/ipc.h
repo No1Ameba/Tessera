@@ -69,6 +69,24 @@ int ipc_accept_client(int *listen_fd);
  */
 void ipc_close_socket(int fd, const char *path);
 
+/* ─── 클라이언트 연결 ───────────────────────────────────────────────────── */
+
+/*
+ * 데몬에 연결한다.
+ *
+ * @param path  ipc_socket_path() 가 준 소켓 경로 / 파이프 이름.
+ * @return      연결된 fd (>= 0), 실패 시 -1.
+ */
+int ipc_connect(const char *path);
+
+/*
+ * 소켓/파이프가 접속 가능한 상태가 될 때까지 기다린다.
+ * 데몬을 막 스폰한 뒤 준비될 때까지 대기하는 용도.
+ *
+ * @return  1 준비됨, 0 타임아웃, -1 오류.
+ */
+int ipc_wait_ready(const char *path, int timeout_ms);
+
 /* ─── 연결 I/O ──────────────────────────────────────────────────────────── */
 
 /*
@@ -96,6 +114,14 @@ ssize_t ipc_write(int fd, const void *buf, size_t len);
  * 항상 즉시 1 을 반환한다.
  */
 int ipc_wait_writable(int fd, int timeout_ms);
+
+/*
+ * fd 에 읽을 데이터가 생길 때까지 기다린다.
+ *
+ * @param timeout_ms  음수면 무한 대기.
+ * @return  1 읽기 가능, 0 타임아웃, -1 오류(상대측 종료 포함).
+ */
+int ipc_wait_readable(int fd, int timeout_ms);
 
 /* 연결 fd 를 닫는다 (listen fd 가 아닌 클라이언트 연결용). */
 void ipc_close_conn(int fd);
