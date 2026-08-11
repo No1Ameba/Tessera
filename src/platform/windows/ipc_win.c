@@ -1,13 +1,20 @@
 /*
  * ipc_win.c — Windows Named Pipe 기반 IPC 백엔드.
  *
- * ⚠️ 검증 상태 + 범위 한계: 이 파일은 Linux/WSL 에서 컴파일 검증되지 않았다(MSVC
- *    필요). 더 중요한 것은, 데몬(ipc_server.c)이 epoll + 논블로킹 fd 이벤트 루프에
- *    강하게 결합돼 있어 Windows 에서 다중 클라이언트를 실제로 서비스하려면 데몬을
- *    IOCP(또는 WaitForMultipleObjects) 로 포팅해야 한다는 점이다. 그 포팅 전까지
- *    아래 구현은 ipc.h 계약(listen/accept/close)에 Named Pipe 를 매핑한 최소
- *    골격이며, HANDLE↔CRT fd 브릿지에 _open_osfhandle 을 사용한다.
- *    accept 모델(단일 인스턴스 반환)은 데몬 포팅 시 재설계 대상이다.
+ * 핸들은 _open_osfhandle 로 CRT fd 에 실어 ipc.h 의 fd 기반 계약에 맞춘다.
+ * 파이프는 FILE_FLAG_OVERLAPPED 로 열리므로(event_loop_win.c 의 IOCP 에 등록해야
+ * 한다) 모든 I/O 에 OVERLAPPED 가 필요하다 — CRT 의 _read/_write 를 쓰면 안 되고
+ * 호출자는 ipc_read/ipc_write 를 거쳐야 한다.
+ *
+ * accept 는 POSIX 와 모델이 다르다. 대기하던 인스턴스가 곧 연결이 되므로
+ * ipc_accept_client 가 그것을 넘겨주고 다음 연결용 인스턴스를 새로 만든다
+ * (ipc.h 의 in/out listen_fd 설명 참고).
+ *
+ * ⚠️ 알려진 문제: PTY 출력이 많을 때(cmd.exe) 데몬의 클라이언트 처리가 간헐적으로
+ *    어긋난다 — tests/test_ipc 가 Windows 에서 비결정적으로 실패하고 드물게 멈춘다.
+ *    데몬이 이벤트 루프 안에서 클라이언트로 직접 쓰기 때문에, 파이프 버퍼가 차면
+ *    최대 500ms 씩 루프가 멈추는 구조가 원인으로 보인다. 클라이언트별 출력 큐를
+ *    두고 쓰기 가능할 때만 흘려보내는 방식이 근본 해법이다.
  */
 #include "../ipc.h"
 #include "../../common/ipc_proto.h"
@@ -220,8 +227,16 @@ ssize_t ipc_read(int fd, void *buf, size_t len) {
 }
 
 ssize_t ipc_write(int fd, const void *buf, size_t len) {
-    /* 파이프 버퍼가 가득 차면 상대가 읽어갈 때까지 최대 500ms 기다린다
-     * (POSIX 쪽 write_all_retry 의 poll 타임아웃과 같은 값). */
+    /*
+     * 파이프 버퍼가 가득 차면 상대가 읽어갈 때까지 최대 500ms 기다린다
+     * (POSIX 쪽 write_all_retry 의 poll 타임아웃과 같은 값).
+     *
+     * 무한 대기로 두면 안 된다 — 데몬은 단일 스레드라, 클라이언트 파이프가 찬
+     * 상태에서 PTY 출력을 쓰다 멈추면 그 클라이언트의 요청을 읽어 줄 주체가
+     * 사라져 교착한다(클라이언트는 응답을 기다리느라 버퍼를 비우지 않는다).
+     * 취소 시 GetOverlappedResult 가 보고하는 전송 바이트 수로 호출자가 이어서
+     * 보내므로 부분 쓰기 자체는 안전하다.
+     */
     return overlapped_io(fd, (void *)buf, len, /*is_write=*/1, 500);
 }
 
