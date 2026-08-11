@@ -218,6 +218,10 @@ static int loop_del(ipc_server_t *srv, int fd) {
     return evloop_del(srv->evloop, fd);
 }
 
+static int loop_mod(ipc_server_t *srv, int fd, uint32_t interest) {
+    return evloop_mod(srv->evloop, fd, interest);
+}
+
 /* ─── 메시지 핸들러 ──────────────────────────────────────────────────────── */
 
 static void handle_hello(ipc_server_t *srv, int client_fd,
@@ -1091,7 +1095,7 @@ static void client_remove(ipc_server_t *srv, ipc_client_slot_t *c) {
     /* 세션 attach 해제 (last_detach_ms 갱신) */
     client_set_session(srv, c, 0);
     loop_del(srv, c->fd);
-    close(c->fd);
+    ipc_close_conn(c->fd);
     c->fd       = -1;
     c->rbuf_len = 0;
 }
@@ -1268,8 +1272,10 @@ int ipc_server_listen(ipc_server_t *srv) {
         return -1;
     }
 
-    /* listen 소켓은 레벨 트리거(EV_READ)로 감시 — accept 루프 단순화. */
-    if (loop_add(srv, srv->listen_fd, EV_READ) < 0) {
+    /* listen 소켓은 레벨 트리거로 감시 — accept 루프 단순화.
+     * EV_ACCEPT 는 POSIX 에서 EV_READ 와 같고, Windows 에서만 overlapped
+     * ConnectNamedPipe 로 무장된다. */
+    if (loop_add(srv, srv->listen_fd, EV_ACCEPT) < 0) {
         evloop_destroy(srv->evloop);
         ipc_close_socket(srv->listen_fd, srv->sock_path);
         srv->listen_fd = -1;
@@ -1445,20 +1451,38 @@ int ipc_server_run(ipc_server_t *srv) {
             int fd = events[i].fd;
 
             if (fd == srv->listen_fd) {
-                /* 신규 클라이언트 연결 */
-                int cfd = ipc_accept_client(srv->listen_fd);
+                /* 신규 클라이언트 연결.
+                 *
+                 * Windows(Named Pipe)에서는 대기하던 인스턴스 자체가 연결이 되어
+                 * listen_fd 가 새 인스턴스로 교체된다. POSIX 는 값이 그대로다.
+                 * 그 차이로 뒤처리를 분기한다. */
+                int prev_listen = srv->listen_fd;
+                int cfd = ipc_accept_client(&srv->listen_fd);
                 if (cfd < 0) continue;
+
+                int rotated = (srv->listen_fd != prev_listen);
 
                 ipc_client_slot_t *slot = client_empty_slot(srv);
                 if (!slot) {
-                    close(cfd);
+                    /* 교체된 경우 cfd 는 루프에 EV_ACCEPT 로 남아 있으니 먼저 뗀다. */
+                    if (rotated) loop_del(srv, cfd);
+                    ipc_close_conn(cfd);
+                    if (rotated) loop_add(srv, srv->listen_fd, EV_ACCEPT);
                     continue;
                 }
                 slot->fd         = cfd;
                 slot->session_id = 0;
                 slot->rbuf_len   = 0;
                 srv->ever_had_client = 1;
-                loop_add(srv, cfd, EV_READ | EV_EDGE);
+
+                if (rotated) {
+                    /* 수락된 인스턴스를 리스너에서 클라이언트 연결로 전환하고,
+                     * 새로 만들어진 인스턴스를 리스너로 등록한다. */
+                    loop_mod(srv, cfd, EV_READ | EV_EDGE);
+                    loop_add(srv, srv->listen_fd, EV_ACCEPT);
+                } else {
+                    loop_add(srv, cfd, EV_READ | EV_EDGE);
+                }
 
             } else {
                 /* PTY 또는 클라이언트 I/O. HUP/ERR 도 데이터 drain + EOF 정리 경로로

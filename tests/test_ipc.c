@@ -171,7 +171,9 @@ static void test_listen_accept(void) {
     int cfd_client = connect_to(path);
     ASSERT(cfd_client >= 0, "클라이언트 connect 성공");
 
-    int cfd_server = ipc_accept_client(lfd);
+    /* listen_fd 는 인/아웃 — POSIX 에서는 값이 바뀌지 않는다
+     * (Windows 는 Named Pipe 인스턴스가 교체된다). */
+    int cfd_server = ipc_accept_client(&lfd);
     ASSERT(cfd_server >= 0, "서버 accept 성공");
 
     close(cfd_client);
