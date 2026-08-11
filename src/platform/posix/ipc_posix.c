@@ -5,6 +5,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -94,4 +95,27 @@ void ipc_close_socket(int fd, const char *path) {
         close(fd);
     if (path)
         unlink(path);
+}
+
+/* ─── 연결 I/O ──────────────────────────────────────────────────────────── */
+
+/* POSIX 에서는 fd 가 이미 O_NONBLOCK 이므로 그대로 얇게 감싸기만 한다. */
+
+ssize_t ipc_read(int fd, void *buf, size_t len) {
+    return read(fd, buf, len);
+}
+
+ssize_t ipc_write(int fd, const void *buf, size_t len) {
+    return write(fd, buf, len);
+}
+
+int ipc_wait_writable(int fd, int timeout_ms) {
+    struct pollfd pf = { fd, POLLOUT, 0 };
+    int r = poll(&pf, 1, timeout_ms);
+    if (r < 0) return -1;
+    return r == 0 ? 0 : 1;
+}
+
+void ipc_close_conn(int fd) {
+    if (fd >= 0) close(fd);
 }

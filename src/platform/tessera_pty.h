@@ -20,7 +20,10 @@
 #include <stddef.h>
 #ifdef _WIN32
 #  include <basetsd.h>
+#  ifndef TESSERA_SSIZE_T_DEFINED
+#    define TESSERA_SSIZE_T_DEFINED
 typedef SSIZE_T ssize_t;   /* MSVC 에는 ssize_t 가 없다 */
+#  endif
 #else
 #  include <sys/types.h>   /* pid_t, ssize_t */
 #endif
