@@ -1,5 +1,7 @@
+#ifndef _WIN32
 /* GNU/POSIX/BSD 확장 활성화: usleep */
 #define _GNU_SOURCE
+#endif
 
 /*
  * test_pty.c — PTY 추상화 레이어 테스트
@@ -13,11 +15,24 @@
 #include "tessera_pty.h"
 
 #include <errno.h>
-#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#  define TEST_SHELL   "cmd.exe"
+#  define sleep_ms(ms) Sleep(ms)
+/* ConPTY 는 콘솔 입력 버퍼에 넣으므로 Enter 가 CR 이다(LF 로는 줄이 제출되지 않는다). */
+#  define TEST_EOL     "\r"
+#else
+#  include <poll.h>
+#  include <unistd.h>
+#  define TEST_SHELL   "/bin/sh"
+#  define sleep_ms(ms) usleep((ms) * 1000)
+#  define TEST_EOL     "\n"
+#endif
 
 /* ─── 미니 테스트 프레임워크 ─────────────────────────────────────────────── */
 
@@ -46,17 +61,17 @@ static int g_fail = 0;
 static ssize_t pty_read_timeout(pty_t *pty, char *buf, size_t buflen,
                                 int timeout_ms) {
     size_t total = 0;
-    struct pollfd pfd = { pty->master_fd, POLLIN, 0 };
 
-    while (total < buflen - 1) {
-        int ret = poll(&pfd, 1, timeout_ms);
-        if (ret <= 0) break;                /* 타임아웃 또는 오류 */
-        if (!(pfd.revents & POLLIN)) break;
-
+    /* pty_read 는 양쪽 플랫폼에서 논블로킹(데이터 없으면 0)이므로 poll 없이
+     * 짧은 주기로 재시도하면 된다. 첫 데이터가 오면 대기 시간을 줄여
+     * 남은 바이트만 빠르게 긁어모은다. */
+    int waited = 0;
+    while (total < buflen - 1 && waited < timeout_ms) {
         ssize_t n = pty_read(pty, buf + total, buflen - total - 1);
-        if (n <= 0) break;
+        if (n < 0) break;                    /* EOF/오류 */
+        if (n == 0) { sleep_ms(5); waited += 5; continue; }
         total += (size_t)n;
-        timeout_ms = 50;  /* 첫 데이터 도착 후 짧게 대기 */
+        if (timeout_ms > 50) { timeout_ms = 50; waited = 0; }
     }
     buf[total] = '\0';
     return (ssize_t)total;
@@ -68,7 +83,7 @@ static void test_spawn_close(void) {
     GROUP("pty_spawn / pty_close");
 
     pty_t pty;
-    int ret = pty_spawn(&pty, "/bin/sh", 80, 24);
+    int ret = pty_spawn(&pty, TEST_SHELL, 80, 24);
     ASSERT(ret == 0,          "spawn 성공");
     ASSERT(pty.master_fd > 0, "master_fd 유효");
     ASSERT(pty.child_pid > 0, "child_pid 유효");
@@ -94,17 +109,17 @@ static void test_write_read(void) {
     GROUP("pty_write / pty_read");
 
     pty_t pty;
-    int ret = pty_spawn(&pty, "/bin/sh", 80, 24);
+    int ret = pty_spawn(&pty, TEST_SHELL, 80, 24);
     ASSERT(ret == 0, "spawn 성공");
 
     if (ret != 0) return;
 
-    /* 셸 초기화 대기 (프롬프트 출력) */
+    /* 셸 초기화 대기 (프롬프트 출력). cmd.exe 는 배너 출력까지 시간이 더 걸린다. */
     char buf[4096];
-    pty_read_timeout(&pty, buf, sizeof(buf), 300);
+    pty_read_timeout(&pty, buf, sizeof(buf), 1000);
 
     /* echo 명령으로 출력 유도 */
-    const char *cmd = "echo TESSERA_TEST_OK\n";
+    const char *cmd = "echo TESSERA_TEST_OK" TEST_EOL;
     ssize_t written = pty_write(&pty, cmd, strlen(cmd));
     ASSERT(written > 0, "write 성공");
 
@@ -120,7 +135,7 @@ static void test_resize(void) {
     GROUP("pty_resize");
 
     pty_t pty;
-    int ret = pty_spawn(&pty, "/bin/sh", 80, 24);
+    int ret = pty_spawn(&pty, TEST_SHELL, 80, 24);
     ASSERT(ret == 0, "spawn 성공");
 
     if (ret != 0) return;
@@ -138,7 +153,7 @@ static void test_nonblocking(void) {
     GROUP("논블로킹 read: 데이터 없으면 0 반환");
 
     pty_t pty;
-    int ret = pty_spawn(&pty, "/bin/sh", 80, 24);
+    int ret = pty_spawn(&pty, TEST_SHELL, 80, 24);
     ASSERT(ret == 0, "spawn 성공");
 
     if (ret != 0) return;
@@ -148,7 +163,7 @@ static void test_nonblocking(void) {
     pty_read_timeout(&pty, buf, sizeof(buf), 300);
 
     /* 아무 명령도 보내지 않고 즉시 read → EAGAIN → 0 */
-    usleep(50 * 1000);  /* 50ms */
+    sleep_ms(50);
     ssize_t n = pty_read(&pty, buf, sizeof(buf));
     ASSERT(n == 0, "EAGAIN → 0 반환");
 
@@ -159,7 +174,7 @@ static void test_double_close(void) {
     GROUP("pty_close 이중 호출 안전성");
 
     pty_t pty;
-    int ret = pty_spawn(&pty, "/bin/sh", 80, 24);
+    int ret = pty_spawn(&pty, TEST_SHELL, 80, 24);
     ASSERT(ret == 0, "spawn 성공");
 
     pty_close(&pty, NULL);
@@ -170,7 +185,7 @@ static void test_double_close(void) {
 static void test_null_safety(void) {
     GROUP("NULL 안전성");
 
-    ASSERT(pty_spawn(NULL, "/bin/sh", 80, 24) == -1, "spawn(NULL) → -1");
+    ASSERT(pty_spawn(NULL, TEST_SHELL, 80, 24) == -1, "spawn(NULL) → -1");
 
     pty_t pty = { .master_fd = -1, .child_pid = -1 };
     ASSERT(pty_read(&pty, NULL, 0) == -1,       "read(bad fd) → -1");

@@ -18,16 +18,16 @@
 #include "ipc_server.h"
 #include "session.h"
 
-#include <arpa/inet.h>
+
 #include <errno.h>
-#include <poll.h>
-#include <pthread.h>
+
+#include "test_compat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <unistd.h>
+
+
+
 
 /* ─── 미니 테스트 프레임워크 ─────────────────────────────────────────────── */
 
@@ -50,21 +50,12 @@ static int g_fail = 0;
 /* ─── 헬퍼: 클라이언트 연결 ─────────────────────────────────────────────── */
 
 static int connect_to(const char *path) {
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
-
     /* 서버가 준비될 때까지 재시도 (최대 500ms) */
     for (int i = 0; i < 10; i++) {
-        if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0)
-            return fd;
-        usleep(50 * 1000);
+        int fd = ipc_connect(path);
+        if (fd >= 0) return fd;
+        test_sleep_ms(50);
     }
-    close(fd);
     return -1;
 }
 
@@ -73,28 +64,45 @@ static int connect_to(const char *path) {
 static int client_send(int fd, ipc_msg_type_t type,
                         const void *payload, uint16_t plen) {
     ipc_msg_header_t hdr = IPC_HEADER_INIT(type, plen);
-    if (write(fd, &hdr, sizeof(hdr)) != (ssize_t)sizeof(hdr)) return -1;
+    if (ipc_write(fd, &hdr, sizeof(hdr)) != (ssize_t)sizeof(hdr)) return -1;
     if (plen > 0 && payload)
-        if (write(fd, payload, plen) != (ssize_t)plen) return -1;
+        if (ipc_write(fd, payload, plen) != (ssize_t)plen) return -1;
     return 0;
 }
 
 static int client_recv(int fd, ipc_msg_header_t *out_hdr,
                         uint8_t *out_payload, size_t payload_max,
                         int timeout_ms) {
-    struct pollfd pfd = { fd, POLLIN, 0 };
-    if (poll(&pfd, 1, timeout_ms) <= 0) return -1;
+    if (ipc_wait_readable(fd, timeout_ms) <= 0) return -1;
 
-    if (read(fd, out_hdr, sizeof(*out_hdr)) != (ssize_t)sizeof(*out_hdr))
+    if (ipc_read(fd, out_hdr, sizeof(*out_hdr)) != (ssize_t)sizeof(*out_hdr))
         return -1;
 
     if (out_hdr->payload_len > 0) {
-        if (out_hdr->payload_len > payload_max) return -1;
-        struct pollfd pfd2 = { fd, POLLIN, 0 };
-        if (poll(&pfd2, 1, timeout_ms) <= 0) return -1;
-        if (read(fd, out_payload, out_hdr->payload_len)
-                != (ssize_t)out_hdr->payload_len)
-            return -1;
+        /*
+         * 페이로드는 버퍼보다 커도 **반드시 끝까지 읽어야** 한다. 헤더만 소비하고
+         * 빠져나가면 스트림이 영구히 어긋나 이후 모든 수신이 깨진다.
+         * (cmd.exe 는 /bin/sh 보다 출력이 훨씬 많아 PTY_OUTPUT 청크가 테스트
+         *  버퍼를 쉽게 넘긴다 — Windows 에서 이 경로가 실제로 밟힌다.)
+         * 일단 전부 받은 뒤 들어갈 만큼만 호출자에게 복사한다.
+         */
+        static uint8_t scratch[IPC_MAX_PAYLOAD_LEN];
+        size_t need = out_hdr->payload_len;
+        size_t got  = 0;
+        while (got < need) {
+            if (ipc_wait_readable(fd, timeout_ms) <= 0) return -1;
+            ssize_t n = ipc_read(fd, scratch + got, need - got);
+            if (n == 0) return -1;
+            if (n < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                return -1;
+            }
+            got += (size_t)n;
+        }
+        /* 버퍼보다 크면 -2 로 알린다(타임아웃 -1 과 구분). 위에서 이미 끝까지
+         * 읽었으므로 스트림은 어긋나지 않고, 스캔을 계속할 수 있다. */
+        if (need > payload_max) return -2;
+        memcpy(out_payload, scratch, need);
     }
     return 0;
 }
@@ -103,14 +111,19 @@ static int client_recv(int fd, ipc_msg_header_t *out_hdr,
  * 원하는 타입의 메시지가 올 때까지 읽는다.
  * 데몬은 PANE_EXITED 같은 브로드캐스트를 응답 사이에 끼워 보낼 수 있으므로,
  * 단순 client_recv 로는 엉뚱한 메시지를 응답으로 오인한다.
+ *
+ * 순회 한도가 넉넉해야 한다 — cmd.exe 는 /bin/sh 보다 출력이 훨씬 많아 응답
+ * 앞에 PTY_OUTPUT 브로드캐스트가 수백 개 쌓일 수 있다(Windows 에서 32회로는
+ * 응답에 도달하기 전에 포기했다).
  */
 static int client_recv_type(int fd, ipc_msg_type_t want,
                              ipc_msg_header_t *out_hdr,
                              uint8_t *out_payload, size_t payload_max,
                              int timeout_ms) {
-    for (int i = 0; i < 32; i++) {
-        if (client_recv(fd, out_hdr, out_payload, payload_max, timeout_ms) < 0)
-            return -1;
+    for (int i = 0; i < 4096; i++) {
+        int r = client_recv(fd, out_hdr, out_payload, payload_max, timeout_ms);
+        if (r == -2) continue;   /* 버퍼보다 큰 브로드캐스트 — 건너뛰고 계속 */
+        if (r < 0) return -1;
         if (out_hdr->type == (uint32_t)want) return 0;
     }
     return -1;
@@ -131,14 +144,14 @@ static void *server_thread(void *arg) {
 
 /* 테스트용 서버 구성: listen 까지 완료 후 스레드 시작 */
 static ipc_server_t *start_test_server(session_manager_t *mgr,
-                                        pthread_t *tid, server_ctx_t *ctx) {
+                                        test_thread_t *tid, server_ctx_t *ctx) {
     ipc_server_t *srv = ipc_server_create(mgr);
     if (!srv) return NULL;
     if (ipc_server_listen(srv) < 0) { ipc_server_destroy(srv); return NULL; }
 
     ctx->srv = srv;
     ctx->mgr = mgr;
-    pthread_create(tid, NULL, server_thread, ctx);
+    test_thread_create(tid, server_thread, ctx);
     return srv;
 }
 
@@ -150,7 +163,11 @@ static void test_socket_path(void) {
     char buf[IPC_SOCKET_PATH_MAX];
     int ret = ipc_socket_path(buf, sizeof(buf));
     ASSERT(ret == 0,        "path 생성 성공");
+#ifdef _WIN32
+    ASSERT(strncmp(buf, "\\\\.\\pipe\\", 9) == 0, "Named Pipe 이름 형식");
+#else
     ASSERT(buf[0] == '/',   "절대 경로");
+#endif
     ASSERT(strstr(buf, "tessera") != NULL, "경로에 'tessera' 포함");
 
     char small[4];
@@ -162,7 +179,13 @@ static void test_listen_accept(void) {
     GROUP("listen / connect / accept");
 
     char path[IPC_SOCKET_PATH_MAX];
+#ifdef _WIN32
+    /* Named Pipe 는 파일시스템 경로가 아니라 \\.\pipe\ 네임스페이스를 쓴다. */
+    snprintf(path, sizeof(path), "\\\\.\\pipe\\tessera_test_%d",
+             (int)GetCurrentProcessId());
+#else
     snprintf(path, sizeof(path), "/tmp/tessera_test_%d.sock", (int)getpid());
+#endif
 
     int lfd = ipc_listen_socket(path);
     ASSERT(lfd >= 0, "listen_socket 성공");
@@ -173,13 +196,21 @@ static void test_listen_accept(void) {
 
     /* listen_fd 는 인/아웃 — POSIX 에서는 값이 바뀌지 않는다
      * (Windows 는 Named Pipe 인스턴스가 교체된다). */
+    int prev = lfd;
     int cfd_server = ipc_accept_client(&lfd);
     ASSERT(cfd_server >= 0, "서버 accept 성공");
+#ifdef _WIN32
+    ASSERT(cfd_server == prev && lfd != prev, "인스턴스 교체됨");
+#else
+    ASSERT(lfd == prev, "listen fd 유지됨");
+#endif
 
-    close(cfd_client);
-    close(cfd_server);
+    ipc_close_conn(cfd_client);
+    ipc_close_conn(cfd_server);
     ipc_close_socket(lfd, path);
+#ifndef _WIN32
     ASSERT(access(path, F_OK) != 0, "소켓 파일 삭제됨");
+#endif
 }
 
 static void test_hello_handshake(void) {
@@ -188,7 +219,7 @@ static void test_hello_handshake(void) {
     session_manager_t mgr;
     session_manager_init(&mgr);
 
-    pthread_t tid;
+    test_thread_t tid;
     server_ctx_t ctx;
     ipc_server_t *srv = start_test_server(&mgr, &tid, &ctx);
     ASSERT(srv != NULL, "서버 시작");
@@ -218,9 +249,9 @@ static void test_hello_handshake(void) {
     const ipc_payload_hello_ack_t *ack = (const ipc_payload_hello_ack_t *)resp_buf;
     ASSERT(ack->daemon_pid > 0,            "daemon_pid 유효");
 
-    close(cfd);
+    ipc_close_conn(cfd);
     ipc_server_shutdown(srv);
-    pthread_join(tid, NULL);
+    test_thread_join(tid);
     ipc_server_destroy(srv);
     session_manager_destroy(&mgr);
 }
@@ -231,7 +262,7 @@ static void test_session_create_list(void) {
     session_manager_t mgr;
     session_manager_init(&mgr);
 
-    pthread_t tid;
+    test_thread_t tid;
     server_ctx_t ctx;
     ipc_server_t *srv = start_test_server(&mgr, &tid, &ctx);
     ASSERT(srv != NULL, "서버 시작");
@@ -278,9 +309,9 @@ static void test_session_create_list(void) {
     ASSERT(ret == 0,                   "중복 이름 ERROR 수신");
     ASSERT(hdr.type == IPC_MSG_ERROR,  "타입 = ERROR");
 
-    close(cfd);
+    ipc_close_conn(cfd);
     ipc_server_shutdown(srv);
-    pthread_join(tid, NULL);
+    test_thread_join(tid);
     ipc_server_destroy(srv);
     session_manager_destroy(&mgr);
 }
@@ -291,7 +322,7 @@ static void test_window_pane_create(void) {
     session_manager_t mgr;
     session_manager_init(&mgr);
 
-    pthread_t tid;
+    test_thread_t tid;
     server_ctx_t ctx;
     ipc_server_t *srv = start_test_server(&mgr, &tid, &ctx);
     ASSERT(srv != NULL, "서버 시작");
@@ -352,12 +383,12 @@ static void test_window_pane_create(void) {
     rreq.cols = 120;
     rreq.rows = 40;
     client_send(cfd, IPC_MSG_PANE_RESIZE, &rreq, sizeof(rreq));
-    client_recv(cfd, &hdr, buf, sizeof(buf), 1000);
+    client_recv_type(cfd, IPC_MSG_OK, &hdr, buf, sizeof(buf), 1000);
     ASSERT(hdr.type == IPC_MSG_OK, "PANE_RESIZE → OK");
 
-    close(cfd);
+    ipc_close_conn(cfd);
     ipc_server_shutdown(srv);
-    pthread_join(tid, NULL);
+    test_thread_join(tid);
     ipc_server_destroy(srv);
     session_manager_destroy(&mgr);
 }
@@ -374,7 +405,7 @@ static uint32_t make_pane(int cfd, uint32_t sid, uint32_t wid,
     preq.cols = cols;
     preq.rows = rows;
     client_send(cfd, IPC_MSG_PANE_CREATE, &preq, sizeof(preq));
-    if (client_recv(cfd, &hdr, buf, sizeof(buf), 1000) < 0) return 0;
+    if (client_recv_type(cfd, IPC_MSG_PANE_CREATED, &hdr, buf, sizeof(buf), 1000) < 0) return 0;
     if (hdr.type != IPC_MSG_PANE_CREATED) return 0;
     return ((ipc_payload_pane_created_t *)buf)->pane_id;
 }
@@ -387,7 +418,7 @@ static uint32_t make_window(int cfd, uint32_t sid, const char *name) {
     wreq.session_id = sid;
     strncpy(wreq.name, name, sizeof(wreq.name) - 1);
     client_send(cfd, IPC_MSG_WINDOW_CREATE, &wreq, sizeof(wreq));
-    if (client_recv(cfd, &hdr, buf, sizeof(buf), 1000) < 0) return 0;
+    if (client_recv_type(cfd, IPC_MSG_WINDOW_CREATED, &hdr, buf, sizeof(buf), 1000) < 0) return 0;
     if (hdr.type != IPC_MSG_WINDOW_CREATED) return 0;
     return ((ipc_payload_window_created_t *)buf)->window_id;
 }
@@ -405,7 +436,7 @@ static int send_resize(int cfd, uint32_t sid, uint32_t wid, uint32_t pid,
     rreq.cols = cols;
     rreq.rows = rows;
     client_send(cfd, IPC_MSG_PANE_RESIZE, &rreq, sizeof(rreq));
-    if (client_recv(cfd, &hdr, buf, sizeof(buf), 1000) < 0) return -1;
+    if (client_recv_type(cfd, IPC_MSG_OK, &hdr, buf, sizeof(buf), 1000) < 0) return -1;
     return hdr.type == IPC_MSG_OK ? 0 : -1;
 }
 
@@ -415,7 +446,7 @@ static void test_attach_multi_window(void) {
     session_manager_t mgr;
     session_manager_init(&mgr);
 
-    pthread_t tid;
+    test_thread_t tid;
     server_ctx_t ctx;
     ipc_server_t *srv = start_test_server(&mgr, &tid, &ctx);
     ASSERT(srv != NULL, "서버 시작");
@@ -467,7 +498,7 @@ static void test_attach_multi_window(void) {
     /* attach → 두 window 와 각자의 blob 이 모두 와야 한다 */
     ipc_payload_session_attach_t areq = { .session_id = sid };
     client_send(cfd, IPC_MSG_SESSION_ATTACH, &areq, sizeof(areq));
-    ASSERT(client_recv(cfd, &hdr, buf, sizeof(buf), 1000) == 0, "ATTACH_R 수신");
+    ASSERT(client_recv_type(cfd, IPC_MSG_SESSION_ATTACH_R, &hdr, buf, sizeof(buf), 1000) == 0, "ATTACH_R 수신");
     ASSERT(hdr.type == IPC_MSG_SESSION_ATTACH_R, "타입 ATTACH_R");
 
     const ipc_payload_session_attach_r_t *resp =
@@ -500,9 +531,9 @@ static void test_attach_multi_window(void) {
     }
     ASSERT(ok == 2, "pane→window 매핑 정확");
 
-    close(cfd);
+    ipc_close_conn(cfd);
     ipc_server_shutdown(srv);
-    pthread_join(tid, NULL);
+    test_thread_join(tid);
     ipc_server_destroy(srv);
     session_manager_destroy(&mgr);
 }
@@ -513,7 +544,7 @@ static void test_pane_size_min_clamp(void) {
     session_manager_t mgr;
     session_manager_init(&mgr);
 
-    pthread_t tid;
+    test_thread_t tid;
     server_ctx_t ctx;
     ipc_server_t *srv = start_test_server(&mgr, &tid, &ctx);
     ASSERT(srv != NULL, "서버 시작");
@@ -561,13 +592,13 @@ static void test_pane_size_min_clamp(void) {
     ASSERT(p && p->cols == 200 && p->rows == 10, "cols/rows 각각 최소");
 
     /* 작은 클라이언트가 나가면 남은 클라이언트 크기로 복귀 */
-    close(c2);
-    for (int i = 0; i < 40 && p && p->rows != 60; i++) usleep(25 * 1000);
+    ipc_close_conn(c2);
+    for (int i = 0; i < 40 && p && p->rows != 60; i++) test_sleep_ms(25);
     ASSERT(p && p->cols == 200 && p->rows == 60, "detach 후 남은 크기로 복귀");
 
-    close(c1);
+    ipc_close_conn(c1);
     ipc_server_shutdown(srv);
-    pthread_join(tid, NULL);
+    test_thread_join(tid);
     ipc_server_destroy(srv);
     session_manager_destroy(&mgr);
 }
@@ -583,7 +614,7 @@ static void test_empty_window_removed(void) {
     session_manager_t mgr;
     session_manager_init(&mgr);
 
-    pthread_t tid;
+    test_thread_t tid;
     server_ctx_t ctx;
     ipc_server_t *srv = start_test_server(&mgr, &tid, &ctx);
     ASSERT(srv != NULL, "서버 시작");
@@ -625,7 +656,7 @@ static void test_empty_window_removed(void) {
     client_send(cfd, IPC_MSG_PTY_INPUT, msg, (uint16_t)sizeof(msg));
 
     /* EOF 처리를 기다린다 */
-    for (int i = 0; i < 60 && s->window_count > 1; i++) usleep(50 * 1000);
+    for (int i = 0; i < 60 && s->window_count > 1; i++) test_sleep_ms(50);
 
     ASSERT(s->window_count == 1, "빈 window 가 제거됨");
     ASSERT(window_find_by_id(s, w2) == NULL, "종료된 window 는 조회 불가");
@@ -645,9 +676,9 @@ static void test_empty_window_removed(void) {
         ASSERT(0, "ATTACH_R 수신");
     }
 
-    close(cfd);
+    ipc_close_conn(cfd);
     ipc_server_shutdown(srv);
-    pthread_join(tid, NULL);
+    test_thread_join(tid);
     ipc_server_destroy(srv);
     session_manager_destroy(&mgr);
 }
@@ -658,7 +689,7 @@ static void test_pty_io(void) {
     session_manager_t mgr;
     session_manager_init(&mgr);
 
-    pthread_t tid;
+    test_thread_t tid;
     server_ctx_t ctx;
     ipc_server_t *srv = start_test_server(&mgr, &tid, &ctx);
     ASSERT(srv != NULL, "서버 시작");
@@ -700,13 +731,16 @@ static void test_pty_io(void) {
     ASSERT(pane_id > 0, "pane 생성 확인");
 
     /* 초기 프롬프트 flush */
-    usleep(300 * 1000);
-    struct pollfd pf = { cfd, POLLIN, 0 };
-    while (poll(&pf, 1, 50) > 0 && (pf.revents & POLLIN))
+    test_sleep_ms(300);
+    while (ipc_wait_readable(cfd, 50) > 0)
         client_recv(cfd, &hdr, buf, sizeof(buf), 100);
 
-    /* echo 명령 입력 */
+    /* echo 명령 입력. ConPTY 는 콘솔 입력 버퍼라 Enter 가 CR 이다. */
+#ifdef _WIN32
+    const char *cmd = "echo IPC_TEST_OK\r";
+#else
     const char *cmd = "echo IPC_TEST_OK\n";
+#endif
     uint8_t inp_buf[sizeof(ipc_payload_pty_data_t) + 32];
     ipc_payload_pty_data_t *inp = (ipc_payload_pty_data_t *)inp_buf;
     inp->pane_id  = pane_id;
@@ -718,8 +752,7 @@ static void test_pty_io(void) {
     /* PTY_OUTPUT 수신 (최대 1s, 여러 청크) */
     int found = 0;
     for (int i = 0; i < 20 && !found; i++) {
-        struct pollfd pf2 = { cfd, POLLIN, 0 };
-        if (poll(&pf2, 1, 100) <= 0) continue;
+        if (ipc_wait_readable(cfd, 100) <= 0) continue;
 
         if (client_recv(cfd, &hdr, buf, sizeof(buf) - 1, 200) != 0) continue;
         if (hdr.type != IPC_MSG_PTY_OUTPUT) continue;
@@ -734,9 +767,9 @@ static void test_pty_io(void) {
     }
     ASSERT(found, "PTY_OUTPUT에서 echo 결과 수신");
 
-    close(cfd);
+    ipc_close_conn(cfd);
     ipc_server_shutdown(srv);
-    pthread_join(tid, NULL);
+    test_thread_join(tid);
     ipc_server_destroy(srv);
     session_manager_destroy(&mgr);
 }
@@ -747,7 +780,7 @@ static void test_error_handling(void) {
     session_manager_t mgr;
     session_manager_init(&mgr);
 
-    pthread_t tid;
+    test_thread_t tid;
     server_ctx_t ctx;
     ipc_server_t *srv = start_test_server(&mgr, &tid, &ctx);
     ASSERT(srv != NULL, "서버 시작");
@@ -774,9 +807,9 @@ static void test_error_handling(void) {
     ASSERT(err->error_code == IPC_ERR_SESSION_NOT_FOUND,
            "에러 코드 = SESSION_NOT_FOUND");
 
-    close(cfd);
+    ipc_close_conn(cfd);
     ipc_server_shutdown(srv);
-    pthread_join(tid, NULL);
+    test_thread_join(tid);
     ipc_server_destroy(srv);
     session_manager_destroy(&mgr);
 }
