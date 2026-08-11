@@ -55,10 +55,21 @@ typedef struct {
 #define PANE_RING_SIZE  (256 * 1024)  /* PTY 출력 링 버퍼 크기 (attach 시 replay) */
 
 typedef struct {
-    int      pty_fd;      /* -1: 빈 슬롯 */
+    int      pty_fd;      /* -1: 빈 슬롯 (pty.master_fd 와 같은 값) */
     uint32_t pane_id;
     uint32_t session_id;
     uint32_t window_id;
+
+    /*
+     * pty_spawn 이 돌려준 핸들 묶음을 그대로 보관한다.
+     *
+     * fd 만 들고 있다가 필요할 때 pty_t 를 다시 만들면 안 된다 — POSIX 의 pty_t
+     * 는 master_fd/child_pid 뿐이라 재구성이 성립하지만, Windows 의 pty_t 는
+     * ConPTY 핸들(hpcon/hout/hin/hev)을 함께 들고 있어서 재구성하면 전부 NULL 이
+     * 되고 pty_read/write/resize 가 즉시 -1 을 낸다. 데몬은 그 -1 을 셸 종료로
+     * 오인해 멀쩡한 pane 을 파괴한다.
+     */
+    pty_t    pty;
 
     /* PTY 출력 링 버퍼 — attach 시 재전송용 */
     uint8_t  ring[PANE_RING_SIZE];
@@ -403,8 +414,7 @@ static void handle_window_destroy(ipc_server_t *srv, int client_fd,
         ipc_pane_slot_t *slot = pane_by_id(srv, p->id);
         if (slot) {
             loop_del(srv, slot->pty_fd);
-            pty_t pty = { .master_fd = slot->pty_fd, .child_pid = p->pid };
-            pty_close(&pty, NULL);
+            pty_close(&slot->pty, NULL);
             slot->pty_fd = -1;
         }
     }
@@ -527,6 +537,7 @@ static void handle_pane_create(ipc_server_t *srv, int client_fd,
 
     /* ipc_server 내부 슬롯 기록 */
     slot->pty_fd     = pty.master_fd;
+    slot->pty        = pty;
     slot->pane_id    = p->id;
     slot->session_id = s->id;
     slot->window_id  = w->id;
@@ -598,8 +609,7 @@ static void handle_pane_destroy(ipc_server_t *srv, int client_fd,
     ipc_pane_slot_t *slot = pane_by_id(srv, p->id);
     if (slot) {
         loop_del(srv, slot->pty_fd);
-        pty_t pty = { .master_fd = slot->pty_fd, .child_pid = p->pid };
-        pty_close(&pty, NULL);
+        pty_close(&slot->pty, NULL);
         slot->pty_fd = -1;
     }
 
@@ -658,8 +668,7 @@ static void pane_apply_min_size(ipc_server_t *srv, ipc_pane_slot_t *slot)
 
     pane_resize(p, cols, rows);
     if (slot->pty_fd >= 0) {
-        pty_t pty = { .master_fd = slot->pty_fd, .child_pid = p->pid };
-        pty_resize(&pty, cols, rows);
+        pty_resize(&slot->pty, cols, rows);
     }
 }
 
@@ -784,8 +793,7 @@ static void handle_pty_input(ipc_server_t *srv, int client_fd,
         return;
     }
 
-    pty_t pty = { .master_fd = slot->pty_fd, .child_pid = -1 };
-    pty_write(&pty, data, data_len);
+    pty_write(&slot->pty, data, data_len);
     /* PTY_INPUT 은 OK 응답 없음 — 비동기 처리 */
 }
 
@@ -1153,11 +1161,10 @@ static void pty_output_read(ipc_server_t *srv, int pty_fd) {
     if (!slot) return;
 
     uint8_t chunk[IPC_PTY_CHUNK_MAX];
-    pty_t pty = { .master_fd = pty_fd, .child_pid = -1 };
 
     int pty_eof = 0;
     for (;;) {
-        ssize_t n = pty_read(&pty, chunk, sizeof(chunk));
+        ssize_t n = pty_read(&slot->pty, chunk, sizeof(chunk));
         if (n == 0) break;          /* EAGAIN — 현재 읽을 데이터 없음, 정상 */
         if (n < 0)  { pty_eof = 1; break; }  /* EIO — 셸 종료, 실제 EOF */
 
@@ -1221,7 +1228,7 @@ static void pty_output_read(ipc_server_t *srv, int pty_fd) {
 
         /* epoll 제거 + pty 닫기 */
         loop_del(srv, slot->pty_fd);
-        pty_close(&pty, NULL);
+        pty_close(&slot->pty, NULL);
         slot->pty_fd = -1;
 
         /* session 트리에서 pane 제거 */
@@ -1329,6 +1336,7 @@ static int restore_one_snapshot(ipc_server_t *srv, const session_snapshot_t *sna
             p->pty_fd = pty.master_fd;
             p->pid    = (int)pty.child_pid;
             slot->pty_fd     = pty.master_fd;
+            slot->pty        = pty;
             slot->pane_id    = p->id;
             slot->session_id = s->id;
             slot->window_id  = w->id;
@@ -1580,9 +1588,7 @@ int ipc_server_run(ipc_server_t *srv) {
                             ipc_pane_slot_t *slot = pane_by_id(srv, p->id);
                             if (slot && slot->pty_fd >= 0) {
                                 loop_del(srv, slot->pty_fd);
-                                pty_t pt = { .master_fd = slot->pty_fd,
-                                             .child_pid = p->pid };
-                                pty_close(&pt, NULL);
+                                pty_close(&slot->pty, NULL);
                                 slot->pty_fd = -1;
                             }
                         }
