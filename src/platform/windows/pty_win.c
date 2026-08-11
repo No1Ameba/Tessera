@@ -100,6 +100,21 @@ int pty_spawn(pty_t *out, const char *shell, uint16_t cols, uint16_t rows) {
     memset(&si, 0, sizeof si);
     si.StartupInfo.cb = sizeof(STARTUPINFOEXW);
 
+    /*
+     * 표준 핸들 상속을 명시적으로 끊는다.
+     *
+     * STARTF_USESTDHANDLES 를 주지 않으면 CreateProcess 가 부모의 표준 핸들을
+     * 자식 프로세스 파라미터로 그대로 넘긴다(bInheritHandles=FALSE 여도). 부모의
+     * stdout 이 파이프로 리다이렉트돼 있으면 자식이 의사 콘솔이 아니라 그 파이프로
+     * 출력해 버려서, ConPTY 는 붙어 있는데 셸 출력이 하나도 안 오는 증상이 된다
+     * (데몬은 DETACHED_PROCESS 로 뜨고 테스트 러너는 출력을 캡처하므로 실제로
+     * 발생한다). 세 핸들을 NULL 로 두면 자식이 의사 콘솔에서 stdio 를 얻는다.
+     */
+    si.StartupInfo.dwFlags    = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput  = NULL;
+    si.StartupInfo.hStdOutput = NULL;
+    si.StartupInfo.hStdError  = NULL;
+
     SIZE_T attrSize = 0;
     InitializeProcThreadAttributeList(NULL, 1, 0, &attrSize);
     si.lpAttributeList = (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(attrSize);
