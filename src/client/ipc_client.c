@@ -1,22 +1,33 @@
+#ifndef _WIN32
 #define _GNU_SOURCE
+#endif
 #include "ipc_client.h"
 #include "../platform/ipc.h"
 #include "../common/mono_time.h"
+#include "../common/paths.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <errno.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <signal.h>
-#include <sys/wait.h>
 #include <time.h>
+
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#  include <process.h>     /* _getpid */
+#  define getpid _getpid
+#else
+#  include <unistd.h>
+#  include <sys/socket.h>
+#  include <sys/un.h>
+#  include <sys/stat.h>
+#  include <sys/types.h>
+#  include <fcntl.h>
+#  include <poll.h>
+#  include <signal.h>
+#  include <sys/wait.h>
+#endif
 
 #define RECV_BUF_SIZE  65536
 #define CMD_TIMEOUT_MS 5000
@@ -25,7 +36,7 @@ struct ipc_client {
     int              fd;         /* Unix socket fd (양방향) 또는 -1 (pipe 모드) */
     int              pipe_r;    /* pipe 모드: 읽기 fd (SSH stdout) */
     int              pipe_w;    /* pipe 모드: 쓰기 fd (SSH stdin) */
-    pid_t            bridge_pid;/* pipe 모드: SSH 자식 PID */
+    long             bridge_pid;/* pipe 모드: SSH 자식 PID (pid_t 는 Windows 에 없다) */
     pty_output_cb_t  cb;
     void            *cb_user;
     pane_exited_cb_t exit_cb;
@@ -53,11 +64,6 @@ static int send_msg(int fd, ipc_msg_type_t type,
                     const void *payload, size_t plen)
 {
     ipc_msg_header_t hdr = IPC_HEADER_INIT(type, (uint16_t)plen);
-    struct iovec iov[2] = {
-        { &hdr,                    sizeof hdr },
-        { (void *)(uintptr_t)payload, plen    },
-    };
-    int iovcnt = plen ? 2 : 1;
     ssize_t total = (ssize_t)(sizeof hdr + plen);
     ssize_t sent  = 0;
 
@@ -65,12 +71,15 @@ static int send_msg(int fd, ipc_msg_type_t type,
     uint8_t buf[sizeof hdr + IPC_MAX_PAYLOAD_LEN];
     memcpy(buf, &hdr, sizeof hdr);
     if (plen) memcpy(buf + sizeof hdr, payload, plen);
-    (void)iov; (void)iovcnt;
 
     while (sent < total) {
-        ssize_t n = write(fd, buf + sent, (size_t)(total - sent));
+        ssize_t n = ipc_write(fd, buf + sent, (size_t)(total - sent));
         if (n < 0) {
             if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (ipc_wait_writable(fd, 500) <= 0) return -1;
+                continue;
+            }
             return -1;
         }
         sent += n;
@@ -169,13 +178,16 @@ static int recv_until_ex(ipc_client_t *c, ipc_msg_type_t want,
         int remaining_ms = (int)(deadline - now_ms());
         if (remaining_ms <= 0) return -1;
 
-        struct pollfd pfd = { .fd = read_fd(c), .events = POLLIN };
-        int ret = poll(&pfd, 1, remaining_ms);
-        if (ret <= 0) return -1; /* timeout or error */
+        if (ipc_wait_readable(read_fd(c), remaining_ms) <= 0)
+            return -1; /* timeout or error */
 
-        ssize_t n = read(read_fd(c), c->rbuf + c->rbuf_len,
-                         RECV_BUF_SIZE - c->rbuf_len);
-        if (n <= 0) return -1; /* EOF or error */
+        ssize_t n = ipc_read(read_fd(c), c->rbuf + c->rbuf_len,
+                             RECV_BUF_SIZE - c->rbuf_len);
+        if (n == 0) return -1;                       /* EOF */
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            return -1;
+        }
         c->rbuf_len += (size_t)n;
     }
 }
@@ -189,31 +201,79 @@ static int recv_until(ipc_client_t *c, ipc_msg_type_t want,
 
 /* ── On-demand daemon spawn ──────────────────────────────────────────────── */
 
+/*
+ * 데몬 바이너리 탐색 순서:
+ *   1. 클라이언트와 같은 디렉토리  (설치 후 /usr/local/bin, Program Files 등)
+ *   2. 클라이언트 디렉토리의 ../daemon/  (빌드 트리에서 실행할 때)
+ *   3. PATH 탐색
+ *
+ * 자기 실행 파일 경로를 exe 에 채운다. 실패하면 0, 성공하면 1.
+ */
+static int self_exe_dir(char *out, size_t out_size)
+{
+#ifdef _WIN32
+    char exe[1024];
+    DWORD n = GetModuleFileNameA(NULL, exe, (DWORD)sizeof exe);
+    if (n == 0 || n >= sizeof exe) return 0;
+    char *slash = strrchr(exe, '\\');
+#else
+    char exe[1024] = {0};
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (n <= 0) return 0;
+    exe[n] = '\0';
+    char *slash = strrchr(exe, '/');
+#endif
+    if (!slash) return 0;
+    size_t dir_len = (size_t)(slash - exe + 1);   /* 구분자 포함 */
+    if (dir_len >= out_size) return 0;
+    memcpy(out, exe, dir_len);
+    out[dir_len] = '\0';
+    return 1;
+}
+
 static int spawn_daemon(void)
 {
-    /*
-     * 데몬 바이너리 탐색 순서:
-     *   1. 클라이언트와 같은 디렉토리  (설치 후 /usr/local/bin/ 경우)
-     *   2. 클라이언트 디렉토리의 ../daemon/  (빌드 트리에서 실행할 때)
-     *   3. execlp 로 PATH 탐색
-     */
-    char exe[1024] = {0};
-    ssize_t elen = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    char dir[1024] = {0};
+    int have_dir = self_exe_dir(dir, sizeof dir);
 
+#ifdef _WIN32
+    /* 후보 경로들을 순서대로 CreateProcess 로 시도한다. */
+    char cand[3][1200];
+    int  n_cand = 0;
+    if (have_dir) {
+        snprintf(cand[n_cand++], sizeof cand[0], "%stessera-daemon.exe", dir);
+        snprintf(cand[n_cand++], sizeof cand[0], "%s..\\daemon\\tessera-daemon.exe", dir);
+    }
+    snprintf(cand[n_cand++], sizeof cand[0], "tessera-daemon.exe");  /* PATH */
+
+    int launched = 0;
+    for (int i = 0; i < n_cand && !launched; i++) {
+        char cmdline[1300];
+        snprintf(cmdline, sizeof cmdline, "\"%s\" --daemon", cand[i]);
+
+        STARTUPINFOA si;
+        memset(&si, 0, sizeof si);
+        si.cb = sizeof si;
+        PROCESS_INFORMATION pi;
+        memset(&pi, 0, sizeof pi);
+
+        /* DETACHED_PROCESS: 콘솔을 물려주지 않는다(데몬은 FreeConsole 도 한다).
+         * CREATE_NEW_PROCESS_GROUP: 클라이언트의 Ctrl+C 가 전파되지 않게. */
+        if (CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
+                           DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                           NULL, NULL, &si, &pi)) {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            launched = 1;
+        }
+    }
+    if (!launched) return -1;
+#else
     char candidate1[1088] = {0};  /* 같은 디렉토리 */
     char candidate2[1088] = {0};  /* ../daemon/ */
-
-    if (elen > 0) {
-        char *slash = strrchr(exe, '/');
-        if (slash) {
-            /* 1: same dir */
-            size_t dir_len = (size_t)(slash - exe + 1);
-            snprintf(candidate1, sizeof candidate1,
-                     "%.*stessera-daemon", (int)dir_len, exe);
-            /* 2: ../daemon/ */
-            snprintf(candidate2, sizeof candidate2,
-                     "%.*s../daemon/tessera-daemon", (int)dir_len, exe);
-        }
+    if (have_dir) {
+        snprintf(candidate1, sizeof candidate1, "%stessera-daemon", dir);
+        snprintf(candidate2, sizeof candidate2, "%s../daemon/tessera-daemon", dir);
     }
 
     pid_t pid = fork();
@@ -231,18 +291,12 @@ static int spawn_daemon(void)
         execlp("tessera-daemon", "tessera-daemon", "--daemon", (char*)NULL);
         _exit(1);
     }
+#endif
 
-    /* Parent: wait up to 2 seconds for the socket to appear. */
+    /* 소켓/파이프가 준비될 때까지 최대 2초 대기. */
     char sock_path[IPC_SOCKET_PATH_MAX];
     if (ipc_socket_path(sock_path, sizeof sock_path) != 0) return -1;
-
-    for (int i = 0; i < 40; i++) {
-        struct timespec ts = { 0, 50 * 1000 * 1000L };
-        nanosleep(&ts, NULL);
-        struct stat st;
-        if (stat(sock_path, &st) == 0) return 0;
-    }
-    return -1;
+    return ipc_wait_ready(sock_path, 2000) == 1 ? 0 : -1;
 }
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
@@ -291,15 +345,8 @@ int ipc_client_connect(ipc_client_t *c)
     /* Try to connect; if the socket doesn't exist, spawn the daemon. */
     int fd = -1;
     for (int attempt = 0; attempt < 2; attempt++) {
-        fd = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (fd < 0) return -1;
-
-        struct sockaddr_un addr = { .sun_family = AF_UNIX };
-        strncpy(addr.sun_path, path, sizeof addr.sun_path - 1);
-
-        if (connect(fd, (struct sockaddr*)&addr, sizeof addr) == 0) break;
-
-        close(fd); fd = -1;
+        fd = ipc_connect(path);
+        if (fd >= 0) break;
         if (attempt == 0) {
             /* Socket missing or refused: try spawning the daemon. */
             if (spawn_daemon() != 0) return -1;
@@ -328,7 +375,7 @@ int ipc_client_connect(ipc_client_t *c)
 void ipc_client_disconnect(ipc_client_t *c)
 {
     if (!c || c->fd < 0) return;
-    close(c->fd);
+    ipc_close_conn(c->fd);
     c->fd = -1;
     c->rbuf_len = 0;
 }
@@ -524,8 +571,15 @@ int ipc_client_pty_input(ipc_client_t *c, uint32_t pane_id,
     ssize_t sent = 0;
     ssize_t tot  = (ssize_t)total;
     while (sent < tot) {
-        ssize_t n = write(write_fd(c), buf + sent, (size_t)(tot - sent));
-        if (n < 0) { if (errno == EINTR) continue; return -1; }
+        ssize_t n = ipc_write(write_fd(c), buf + sent, (size_t)(tot - sent));
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (ipc_wait_writable(write_fd(c), 500) <= 0) return -1;
+                continue;
+            }
+            return -1;
+        }
         sent += n;
     }
     return 0;
@@ -535,15 +589,15 @@ int ipc_client_poll(ipc_client_t *c, int timeout_ms)
 {
     if (!c || read_fd(c) < 0) return -1;
 
-    struct pollfd pfd = { .fd = read_fd(c), .events = POLLIN };
-    int ret = poll(&pfd, 1, timeout_ms);
+    int ret = ipc_wait_readable(read_fd(c), timeout_ms);
     if (ret < 0) return -1;
     if (ret == 0) return 0;
 
     /* Read available data. */
-    ssize_t n = read(read_fd(c), c->rbuf + c->rbuf_len,
-                     RECV_BUF_SIZE - c->rbuf_len);
-    if (n <= 0) return -1;
+    ssize_t n = ipc_read(read_fd(c), c->rbuf + c->rbuf_len,
+                         RECV_BUF_SIZE - c->rbuf_len);
+    if (n == 0) return -1;                         /* 데몬 종료 */
+    if (n < 0) return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
     c->rbuf_len += (size_t)n;
 
     /* Dispatch all complete messages. */
@@ -562,6 +616,15 @@ int ipc_client_connect_remote(ipc_client_t *c, const char *ssh_target)
 {
     if (!c || !ssh_target) return -1;
 
+#ifdef _WIN32
+    /* TODO(windows): SSH 자식의 stdin/stdout 을 상속 가능한 overlapped 파이프로
+     * 만들어 CreateProcess 로 띄우면 된다(pty_win.c 의 make_pipe 와 같은 방식).
+     * 로컬 연결 경로와 독립적인 기능이라 별도 작업으로 남긴다. */
+    fprintf(stderr,
+            "tessera: --remote 는 아직 Windows 에서 지원되지 않습니다 "
+            "(SSH 브릿지 미구현). 로컬 세션만 사용할 수 있습니다.\n");
+    return -1;
+#else
     int to_child[2], from_child[2];
     if (pipe(to_child) < 0 || pipe(from_child) < 0) return -1;
 
@@ -625,6 +688,7 @@ int ipc_client_connect_remote(ipc_client_t *c, const char *ssh_target)
 
     fprintf(stderr, "[remote] connected via SSH bridge\n");
     return 0;
+#endif /* !_WIN32 */
 }
 
 /* ── 세션 attach ─────────────────────────────────────────────────────────── */
@@ -722,14 +786,15 @@ int ipc_client_session_save(ipc_client_t *c, uint32_t session_id,
         return -1;
 
     /* JSON을 임시 파일에 쓰고 session_snapshot_load로 파싱 */
-    char tmp_path[64];
-    snprintf(tmp_path, sizeof tmp_path, "/tmp/tessera-snap-cli-%d.json", (int)getpid());
+    char tmp_path[512];
+    if (tessera_temp_path("tessera-snap-cli", tmp_path, sizeof tmp_path) != 0)
+        return -1;
     FILE *fp = fopen(tmp_path, "w");
     if (!fp) return -1;
     fputs((const char *)json_buf, fp);
     fclose(fp);
     int ret = session_snapshot_load(tmp_path, out);
-    unlink(tmp_path);
+    remove(tmp_path);
     return ret;
 }
 

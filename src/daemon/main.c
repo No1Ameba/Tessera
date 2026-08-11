@@ -3,12 +3,21 @@
 #include "ipc_server.h"
 #include "session.h"
 #include "../common/config.h"
+#include "../common/paths.h"
 
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#  include <process.h>     /* _getpid */
+#  define getpid _getpid
+#else
+#  include <unistd.h>
+#endif
 
 /* ─── 전역 종료 플래그 ───────────────────────────────────────────────────── */
 
@@ -17,6 +26,70 @@ static ipc_server_t *g_server = NULL;
 static void sig_handler(int sig) {
     (void)sig;
     if (g_server) ipc_server_shutdown(g_server);
+}
+
+#ifdef _WIN32
+/* 콘솔 닫기·로그오프·셧다운은 시그널로 오지 않아 따로 받아야 한다. */
+static BOOL WINAPI console_ctrl_handler(DWORD type) {
+    switch (type) {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+    case CTRL_CLOSE_EVENT:
+    case CTRL_LOGOFF_EVENT:
+    case CTRL_SHUTDOWN_EVENT:
+        if (g_server) ipc_server_shutdown(g_server);
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+#endif
+
+/*
+ * 종료 신호 처리 등록.
+ *
+ * POSIX 는 SIGTERM/SIGINT 에 더해 SIGCHLD 를 SIG_IGN + SA_NOCLDWAIT 로 두어
+ * PTY 자식이 좀비로 남지 않게 한다. Windows 에는 좀비 개념이 없어 그 부분이
+ * 필요 없고, 대신 콘솔 제어 이벤트를 받는다.
+ */
+static void install_signal_handlers(void)
+{
+#ifdef _WIN32
+    signal(SIGINT,  sig_handler);
+    signal(SIGTERM, sig_handler);
+    SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
+#else
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = sig_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT,  &sa, NULL);
+
+    /* SIGCHLD: PTY 자식 프로세스 자동 수거 (좀비 방지) */
+    struct sigaction sa_chld;
+    memset(&sa_chld, 0, sizeof(sa_chld));
+    sa_chld.sa_handler = SIG_IGN;
+    sa_chld.sa_flags   = SA_NOCLDWAIT;
+    sigaction(SIGCHLD, &sa_chld, NULL);
+#endif
+}
+
+/*
+ * 백그라운드로 분리한다.
+ *
+ * Windows 에는 fork 기반 daemon(3) 이 없다. 대신 프로세스를 띄우는 쪽이
+ * DETACHED_PROCESS 로 만들고, 여기서는 콘솔이 붙어 있으면 떼어낸다.
+ * @return 0 성공, -1 실패.
+ */
+static int detach_from_terminal(void)
+{
+#ifdef _WIN32
+    FreeConsole();   /* 콘솔이 없으면 실패하지만 무해하다 */
+    return 0;
+#else
+    return daemon(0, 0);
+#endif
 }
 
 /* ─── 사용법 ─────────────────────────────────────────────────────────────── */
@@ -49,26 +122,13 @@ int main(int argc, char *argv[]) {
 
     /* 데몬화 */
     if (daemonize) {
-        if (daemon(0, 0) < 0) {
+        if (detach_from_terminal() < 0) {
             perror("daemon");
             return 1;
         }
     }
 
-    /* 시그널 핸들러 등록 */
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = sig_handler;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGTERM, &sa, NULL);
-    sigaction(SIGINT,  &sa, NULL);
-
-    /* SIGCHLD: PTY 자식 프로세스 자동 수거 (좀비 방지) */
-    struct sigaction sa_chld;
-    memset(&sa_chld, 0, sizeof(sa_chld));
-    sa_chld.sa_handler = SIG_IGN;
-    sa_chld.sa_flags   = SA_NOCLDWAIT;
-    sigaction(SIGCHLD, &sa_chld, NULL);
+    install_signal_handlers();
 
     /* 세션 매니저 초기화 */
     session_manager_t mgr;
@@ -88,17 +148,13 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* 설정 로드 — ~/.config/tessera/config.json 의 daemon 섹션 반영 */
+    /* 설정 로드 — <설정 디렉토리>/config.json 의 daemon 섹션 반영 */
     {
         tessera_config_t cfg;
         config_defaults(&cfg);
-        const char *home = getenv("HOME");
-        if (home) {
-            char cfg_path[512];
-            snprintf(cfg_path, sizeof cfg_path,
-                     "%s/.config/tessera/config.json", home);
+        char cfg_path[512];
+        if (tessera_config_path("config.json", cfg_path, sizeof cfg_path) == 0)
             config_load_file(cfg_path, &cfg);  /* 실패 시 defaults 유지 */
-        }
         ipc_server_configure(srv, cfg.autosave_interval,
                               cfg.session_idle_timeout);
         if (!daemonize)
