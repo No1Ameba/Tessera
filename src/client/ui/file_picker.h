@@ -2,9 +2,11 @@
 #define TESSERA_FILE_PICKER_H
 
 /*
- * 네이티브 파일 선택 다이얼로그 — zenity / kdialog 외부 프로세스를 popen 으로
- * 실행해 사용자에게 파일 경로를 받는다. 시스템에 해당 프로그램이 없거나
- * 사용자가 취소한 경우 실패로 반환된다.
+ * 네이티브 파일 선택 다이얼로그.
+ *   POSIX   — zenity / kdialog 외부 프로세스를 popen 으로 실행.
+ *   Windows — comdlg32 의 GetOpenFileNameW / GetSaveFileNameW.
+ * 시스템에 해당 수단이 없거나 사용자가 취소한 경우 실패로 반환된다.
+ * 경로는 어느 플랫폼에서나 UTF-8 로 반환된다.
  *
  * 반환:
  *   1  성공 (out_path 채워짐)

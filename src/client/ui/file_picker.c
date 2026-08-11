@@ -1,10 +1,108 @@
+#ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
+#endif
 
 #include "file_picker.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <commdlg.h>
+
+/* ── Windows: 공용 파일 대화상자 (comdlg32) ───────────────────────────────── */
+
+/* UTF-8 → UTF-16. 실패하면 빈 문자열을 남긴다. */
+static void to_wide(const char *s, wchar_t *out, int out_cch)
+{
+    out[0] = L'\0';
+    if (!s || !*s) return;
+    MultiByteToWideChar(CP_UTF8, 0, s, -1, out, out_cch);
+    out[out_cch - 1] = L'\0';
+}
+
+/*
+ * lpstrFilter 는 "설명\0패턴\0…\0\0" 형태의 이중 NUL 종료 문자열이다.
+ * 호출부는 "*.json" 같은 글롭 하나만 주므로 그 항목 + "All Files" 를 만든다.
+ */
+static void build_filter(const char *filter, wchar_t *out, int out_cch)
+{
+    wchar_t pat[64];
+    int p = 0;
+    if (filter && *filter) {
+        to_wide(filter, pat, (int)(sizeof pat / sizeof pat[0]));
+        p += swprintf(out + p, (size_t)(out_cch - p), L"%ls", pat) + 1;
+        p += swprintf(out + p, (size_t)(out_cch - p), L"%ls", pat) + 1;
+    }
+    p += swprintf(out + p, (size_t)(out_cch - p), L"All Files") + 1;
+    p += swprintf(out + p, (size_t)(out_cch - p), L"*.*") + 1;
+    out[p] = L'\0';   /* 이중 NUL 종료 */
+}
+
+/* 대화상자 취소는 CommDlgExtendedError()==0 으로 구분된다(에러는 0 이 아님). */
+static int finish(BOOL ok, const wchar_t *wpath, char *out_path, size_t out_size)
+{
+    if (!ok)
+        return CommDlgExtendedError() == 0 ? 0 : -1;
+    if (WideCharToMultiByte(CP_UTF8, 0, wpath, -1,
+                            out_path, (int)out_size, NULL, NULL) == 0)
+        return -1;
+    return out_path[0] ? 1 : 0;
+}
+
+int file_picker_open(char *out_path, size_t out_size,
+                      const char *title, const char *filter)
+{
+    if (!out_path || out_size == 0) return -1;
+    out_path[0] = '\0';
+
+    wchar_t wpath[MAX_PATH] = {0};
+    wchar_t wtitle[256], wfilter[256];
+    to_wide(title ? title : "Open", wtitle, 256);
+    build_filter(filter, wfilter, 256);
+
+    OPENFILENAMEW ofn = {0};
+    ofn.lStructSize  = sizeof ofn;
+    ofn.lpstrFilter  = wfilter;
+    ofn.lpstrFile    = wpath;
+    ofn.nMaxFile     = MAX_PATH;
+    ofn.lpstrTitle   = wtitle;
+    ofn.Flags        = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+
+    return finish(GetOpenFileNameW(&ofn), wpath, out_path, out_size);
+}
+
+int file_picker_save(char *out_path, size_t out_size,
+                      const char *title,
+                      const char *default_name,
+                      const char *filter)
+{
+    if (!out_path || out_size == 0) return -1;
+    out_path[0] = '\0';
+
+    wchar_t wpath[MAX_PATH] = {0};
+    wchar_t wtitle[256], wfilter[256];
+    to_wide(title ? title : "Save", wtitle, 256);
+    to_wide(default_name, wpath, MAX_PATH);   /* 기본 파일명 제안 */
+    build_filter(filter, wfilter, 256);
+
+    OPENFILENAMEW ofn = {0};
+    ofn.lStructSize  = sizeof ofn;
+    ofn.lpstrFilter  = wfilter;
+    ofn.lpstrFile    = wpath;
+    ofn.nMaxFile     = MAX_PATH;
+    ofn.lpstrTitle   = wtitle;
+    ofn.Flags        = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+
+    return finish(GetSaveFileNameW(&ofn), wpath, out_path, out_size);
+}
+
+#else /* !_WIN32 */
+
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -186,3 +284,5 @@ int file_picker_save(char *out_path, size_t out_size,
     if (r != -1) return r;
     return -1;
 }
+
+#endif /* !_WIN32 */
