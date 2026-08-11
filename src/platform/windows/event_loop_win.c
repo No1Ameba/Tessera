@@ -208,6 +208,17 @@ int evloop_wait(event_loop_t *el, ev_ready_t *out, int max, int timeout_ms) {
             if (!GetOverlappedResult(w->h, &w->ov, &bytes, FALSE))
                 err = GetLastError();
         }
+
+        /*
+         * 취소된 I/O 는 이벤트가 아니다.
+         *
+         * CancelIoEx(evloop_mod / evloop_del)로 끊은 I/O 도 완료 패킷을 하나 남기며
+         * 그 상태는 ERROR_OPERATION_ABORTED 다. 이걸 EV_ERROR 로 올리면 호출자가
+         * 멀쩡한 연결을 끊어 버린다(ipc_server.c 는 EV_ERROR 를 보면 클라이언트를
+         * 제거한다). 무장 해제 상태로 두면 다음 회차에 정상적으로 다시 걸린다.
+         */
+        if (err == ERROR_OPERATION_ABORTED) continue;
+
         if (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED ||
             err == ERROR_HANDLE_EOF)
             revents = EV_HANGUP;

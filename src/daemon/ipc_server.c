@@ -1491,6 +1491,8 @@ int ipc_server_run(ipc_server_t *srv) {
         int nev = evloop_wait(srv->evloop, events, IPC_LOOP_EVENTS, 200);
         if (nev < 0) {
             if (errno == EINTR) continue;
+            fprintf(stderr, "[tessera-daemon] evloop_wait 실패 (errno=%d) — 종료\n",
+                    errno);
             return -1;
         }
 
@@ -1597,8 +1599,10 @@ int ipc_server_run(ipc_server_t *srv) {
             int has_clients = 0;
             for (int i = 0; i < IPC_MAX_CLIENTS; i++)
                 if (srv->clients[i].fd >= 0) { has_clients = 1; break; }
-            if (!has_clients)
+            if (!has_clients) {
+                fprintf(stderr, "[tessera-daemon] 세션·클라이언트 모두 없음 — 자동 종료\n");
                 srv->running = 0;
+            }
         }
     }
 
