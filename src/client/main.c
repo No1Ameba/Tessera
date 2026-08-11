@@ -37,6 +37,7 @@
 #include "text_select.h"
 #include "client_util.h"
 #include "ipc_client.h"
+#include "../common/mono_time.h"
 #include "ui/layout.h"
 #include "ui/input.h"
 #include "ui/nk_impl.h"
@@ -137,7 +138,7 @@ static int      g_anchor_sc = 0, g_anchor_ec = 0;
 static int64_t  g_anchor_sr_li = 0, g_anchor_er_li = 0;
 
 /* 더블/트리플 클릭 감지 — 같은 셀에서 300ms 이내 반복 클릭 카운트 */
-static long     g_last_click_ms = 0;
+static int64_t  g_last_click_ms = 0;
 static uint32_t g_last_click_pane = 0;
 static int      g_last_click_col = -1, g_last_click_row = -1;
 static int      g_click_count = 0;
@@ -1627,7 +1628,7 @@ static void mouse_button_callback(GLFWwindow *win, int button, int action,
 
         if (press) {
             /* 더블/트리플 클릭 감지 */
-            long now = now_ms_mono();
+            int64_t now = now_ms_mono();
             int same_cell = (g_last_click_pane == g_active_pane &&
                               g_last_click_col == local_x &&
                               g_last_click_row == local_y);
@@ -1647,14 +1648,15 @@ static void mouse_button_callback(GLFWwindow *win, int button, int action,
             /* 클릭 시점의 LI (absolute row index) 계산 */
             int64_t li = active_slot ? li_from_view_row(&active_slot->screen, local_y) : (int64_t)local_y;
 
-            /* 모드 결정: 1=cell, 2=word, 3=line → g_sel_mode 0/1/2 */
-            int mode = (g_click_count == 3) ? 2 : (g_click_count == 2 ? 1 : 0);
+            /* 모드 결정: 1=cell, 2=word, 3=line → g_sel_mode 0/1/2
+             * (바깥 스코프의 `mode` 는 마우스 프로토콜 모드라 이름을 구분한다) */
+            int sel_mode = (g_click_count == 3) ? 2 : (g_click_count == 2 ? 1 : 0);
             int anchor_sc = local_x, anchor_ec = local_x;
             if (active_slot)
-                expand_range(&active_slot->screen, li, local_x, mode,
+                expand_range(&active_slot->screen, li, local_x, sel_mode,
                               &anchor_sc, &anchor_ec);
 
-            g_sel_mode = mode;
+            g_sel_mode = sel_mode;
             g_anchor_sc = anchor_sc; g_anchor_ec = anchor_ec;
             g_anchor_sr_li = g_anchor_er_li = li;
 
@@ -2276,10 +2278,8 @@ int main(int argc, char *argv[])
 
         /* 렌더링 (커서 블링크를 위해 항상 렌더 시도, 16ms 캡이 제한) */
         {
-            struct timespec ts_now;
-            clock_gettime(CLOCK_MONOTONIC, &ts_now);
-            static long last_render_ms = 0;
-            long now_ms = ts_now.tv_sec * 1000L + ts_now.tv_nsec / 1000000L;
+            static int64_t last_render_ms = 0;
+            int64_t now_ms = tessera_mono_ms();
             if (now_ms - last_render_ms >= 16) {
                 last_render_ms = now_ms;
                 g_dirty = 0;

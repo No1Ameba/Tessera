@@ -1,12 +1,11 @@
 #include "session.h"
+#include "../common/mono_time.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 static int64_t mono_ms_now(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return tessera_mono_ms();
 }
 
 /* ─── 내부 헬퍼: ID 발급 ─────────────────────────────────────────────────── */

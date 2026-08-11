@@ -4,6 +4,7 @@ add_library(tessera_common STATIC
     theme_presets.c
     utf8.c
     session_file.c
+    mono_time.c
 )
 
 target_include_directories(tessera_common

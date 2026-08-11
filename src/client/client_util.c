@@ -1,7 +1,7 @@
 #define _GNU_SOURCE
 #include "client_util.h"
 
-#include <time.h>
+#include "../common/mono_time.h"
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -9,11 +9,9 @@
 #include <sys/types.h>
 #endif
 
-long now_ms_mono(void)
+int64_t now_ms_mono(void)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+    return tessera_mono_ms();
 }
 
 void open_url(const char *url)

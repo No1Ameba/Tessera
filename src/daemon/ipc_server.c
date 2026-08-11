@@ -4,6 +4,7 @@
 #include "session.h"
 #include "../common/ipc_proto.h"
 #include "../common/session_file.h"
+#include "../common/mono_time.h"
 #include <dirent.h>
 #include "../platform/ipc.h"
 #include "../platform/tessera_pty.h"
@@ -82,9 +83,7 @@ struct ipc_server {
 static int write_all_retry(int fd, const void *buf, size_t len);
 
 static int64_t mono_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return tessera_mono_ms();
 }
 
 /* 세션에 남은 pane 총 개수 (모든 윈도우 합) */

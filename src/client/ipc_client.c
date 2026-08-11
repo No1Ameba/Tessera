@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "ipc_client.h"
 #include "../platform/ipc.h"
+#include "../common/mono_time.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,9 +40,7 @@ struct ipc_client {
 
 static int64_t now_ms(void)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return tessera_mono_ms();
 }
 
 /* 읽기/쓰기 fd 선택: pipe 모드면 pipe_r/pipe_w, 아니면 fd */

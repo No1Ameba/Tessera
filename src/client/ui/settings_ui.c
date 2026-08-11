@@ -111,6 +111,11 @@ static void load_font_list(void)
     if (g_font_list_loaded) return;
     g_font_list_loaded = 1;
 
+#ifdef _WIN32
+    /* TODO(windows): fontconfig 가 없다. 목록을 비워 두면 설정 UI 의 폰트 콤보가
+     * 빈 채로 뜬다 — %WINDIR%\Fonts 열거 또는 DirectWrite 로 채워야 한다. */
+    return;
+#else
     /* fc-list :spacing=100 : family (모노스페이스 폰트만) */
     FILE *fp = popen("fc-list :spacing=100 : family 2>/dev/null | sort -u", "r");
     if (!fp) return;
@@ -131,6 +136,7 @@ static void load_font_list(void)
         g_font_list_count++;
     }
     pclose(fp);
+#endif
 }
 
 /* ── 탭별 내용 ──────────────────────────────────────────────────────────── */

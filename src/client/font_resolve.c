@@ -12,7 +12,10 @@ const char *resolve_font_path(const char *name, char *buf, size_t bufsz)
         FILE *f = fopen(name, "rb");
         if (f) { fclose(f); return name; }
     }
-#ifndef _WIN32
+#ifdef _WIN32
+    /* fontconfig(fc-match) 가 없으므로 아래 폴백 목록으로 바로 내려간다. */
+    (void)buf; (void)bufsz;
+#else
     if (name && name[0]) {
         char cmd[512];
         snprintf(cmd, sizeof cmd, "fc-match --format='%%{file}' '%s' 2>/dev/null", name);

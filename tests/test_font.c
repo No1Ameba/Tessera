@@ -9,7 +9,12 @@
 #include <assert.h>
 #include "../src/client/renderer/font.h"
 
+#ifdef _WIN32
+/* Consolas — Windows 에 항상 설치되는 모노스페이스 폰트. */
+#define FONT_PATH "C:\\Windows\\Fonts\\consola.ttf"
+#else
 #define FONT_PATH "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+#endif
 #define FONT_SIZE  12.0f
 #define FONT_DPI   96
 
@@ -30,7 +35,9 @@ static int g_pass = 0, g_fail = 0;
 static void test_load_face(void)
 {
     font_face_t *f = font_face_load(FONT_PATH, FONT_SIZE, FONT_DPI);
-    CHECK(f != NULL, "font_face_load succeeds for DejaVu Sans Mono");
+    CHECK(f != NULL, "font_face_load succeeds for " FONT_PATH);
+    /* 로드 실패 시 이후 접근은 전부 NULL 역참조 → 세그폴트. 여기서 끊는다. */
+    if (!f) return;
 
     int cw = font_cell_width(f);
     int ch = font_cell_height(f);
@@ -148,6 +155,11 @@ static void test_cell_metrics_consistent(void)
  * Returns 1 with an absolute path in out, 0 if nothing usable was found. */
 static int fc_resolve(const char *pattern, char *out, size_t outsz)
 {
+#ifdef _WIN32
+    /* fontconfig 가 없으므로 폴백 체인 테스트는 Windows 에서 건너뛴다. */
+    (void)pattern; (void)out; (void)outsz;
+    return 0;
+#else
     char cmd[256];
     snprintf(cmd, sizeof cmd,
              "fc-match --format='%%{file}' '%s' 2>/dev/null", pattern);
@@ -159,6 +171,7 @@ static int fc_resolve(const char *pattern, char *out, size_t outsz)
     out[n] = '\0';
     if (out[n - 1] == '\n') out[--n] = '\0';
     return out[0] == '/';
+#endif
 }
 
 static void test_fallback_chain(void)

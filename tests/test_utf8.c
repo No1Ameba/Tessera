@@ -68,7 +68,7 @@ static void test_decode_ascii(void) {
 
 static void test_decode_hangul(void) {
     TEST("decode: 한글 '가' (3바이트)");
-    const char ga[] = { (char)0xEA, (char)0xB0, (char)0x80 };
+    const char ga[] = { (char)(unsigned char)0xEA, (char)(unsigned char)0xB0, (char)(unsigned char)0x80 };
     uint32_t cp;
     int n = utf8_decode_one(ga, 3, &cp);
     ASSERT(n == 3,         "소비 바이트 3");
@@ -77,21 +77,21 @@ static void test_decode_hangul(void) {
 
 static void test_decode_emoji(void) {
     TEST("decode: 이모지 U+1F600 (4바이트)");
-    const char e[] = { (char)0xF0, (char)0x9F, (char)0x98, (char)0x80 };
+    const char e[] = { (char)(unsigned char)0xF0, (char)(unsigned char)0x9F, (char)(unsigned char)0x98, (char)(unsigned char)0x80 };
     uint32_t cp;
     ASSERT(utf8_decode_one(e, 4, &cp) == 4 && cp == 0x1F600, "U+1F600");
 }
 
 static void test_decode_invalid_lead(void) {
     TEST("decode: 연속 바이트를 선두로 사용 → U+FFFD");
-    const char bad[] = { (char)0x80 };
+    const char bad[] = { (char)(unsigned char)0x80 };
     uint32_t cp;
     ASSERT(utf8_decode_one(bad, 1, &cp) == 1 && cp == 0xFFFD, "0x80 → U+FFFD");
 }
 
 static void test_decode_truncated(void) {
     TEST("decode: 잘린 시퀀스 → U+FFFD");
-    const char trunc[] = { (char)0xEA, (char)0xB0 };  /* '가' 에서 마지막 바이트 없음 */
+    const char trunc[] = { (char)(unsigned char)0xEA, (char)(unsigned char)0xB0 };  /* '가' 에서 마지막 바이트 없음 */
     uint32_t cp;
     ASSERT(utf8_decode_one(trunc, 2, &cp) == 1 && cp == 0xFFFD, "잘린 3바이트 → U+FFFD");
 }
@@ -174,8 +174,8 @@ static void test_str_width(void) {
     ASSERT(utf8_str_width("AB") == 2, "\"AB\" → 2");
 
     /* "가나" in UTF-8 */
-    const char gana[] = { (char)0xEA,(char)0xB0,(char)0x80,
-                          (char)0xEB,(char)0x82,(char)0x98, 0 };
+    const char gana[] = { (char)(unsigned char)0xEA,(char)(unsigned char)0xB0,(char)(unsigned char)0x80,
+                          (char)(unsigned char)0xEB,(char)(unsigned char)0x82,(char)(unsigned char)0x98, 0 };
     ASSERT(utf8_str_width(gana) == 4, "\"가나\" → 4");
 
     ASSERT(utf8_str_width("") == 0, "빈 문자열 → 0");
@@ -186,9 +186,9 @@ static void test_cp_count(void) {
     ASSERT(utf8_cp_count("ABC") == 3, "\"ABC\" → 3");
 
     /* "가나다" = 3 코드 포인트 */
-    const char gnd[] = { (char)0xEA,(char)0xB0,(char)0x80,
-                         (char)0xEB,(char)0x82,(char)0x98,
-                         (char)0xEB,(char)0x8B,(char)0xA4, 0 };
+    const char gnd[] = { (char)(unsigned char)0xEA,(char)(unsigned char)0xB0,(char)(unsigned char)0x80,
+                         (char)(unsigned char)0xEB,(char)(unsigned char)0x82,(char)(unsigned char)0x98,
+                         (char)(unsigned char)0xEB,(char)(unsigned char)0x8B,(char)(unsigned char)0xA4, 0 };
     ASSERT(utf8_cp_count(gnd) == 3, "\"가나다\" → 3");
 
     ASSERT(utf8_cp_count("") == 0, "빈 문자열 → 0");
