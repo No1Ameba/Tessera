@@ -12,8 +12,13 @@
 
 add_library(glad STATIC src/glad.c)
 
-# glad 생성 코드는 -Werror/-pedantic과 호환되지 않음
-target_compile_options(glad PRIVATE -Wno-error -Wno-pedantic)
+# glad 생성 코드는 -Werror/-pedantic과 호환되지 않음.
+# MSVC 는 GCC 식 -Wno-* 를 모르고 `error D8021` 로 죽으므로 /WX- 로 경고 승격만 해제한다.
+if(MSVC)
+    target_compile_options(glad PRIVATE /W3 /WX-)
+else()
+    target_compile_options(glad PRIVATE -Wno-error -Wno-pedantic)
+endif()
 
 target_include_directories(glad
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include

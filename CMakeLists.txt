@@ -19,7 +19,14 @@ include(cmake/platform.cmake)
 # 컴파일 옵션
 # -----------------------------------------------------------------------------
 if(MSVC)
-    add_compile_options(/W4 /WX)
+    # /utf-8: 소스는 BOM 없는 UTF-8 이고 주석·문자열에 한글이 들어 있다. 이 플래그가
+    # 없으면 MSVC 가 시스템 코드페이지(한국어 Windows 는 949)로 읽어 C4819 경고와
+    # C2001("상수에 줄 바꿈 문자") 하드 에러가 전 파일에서 터진다.
+    add_compile_options(/W4 /WX /utf-8)
+    # C4996 대상은 fopen/sscanf/strncpy/wcscpy/wcsncpy — 전부 표준 C 함수다.
+    # MSVC 가 권하는 *_s 변형은 Annex K 로 glibc 에 없으므로, 이식성을 지키려면
+    # 코드를 바꾸는 대신 이 경고를 끄는 쪽이 맞다.
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 else()
     add_compile_options(-Wall -Wextra -Werror -pedantic)
 endif()
@@ -84,9 +91,14 @@ if(TESSERA_BUILD_APPS)
         GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(glfw)
-    # GLFW 소스는 -Werror로 컴파일하면 실패 → 해제
+    # GLFW 소스는 -Werror로 컴파일하면 실패 → 해제.
+    # MSVC 는 -Wno-error 를 인식하지 못하고 `error D8021` 로 죽으므로 /WX- 를 쓴다.
     if(TARGET glfw)
-        target_compile_options(glfw PRIVATE -Wno-error)
+        if(MSVC)
+            target_compile_options(glfw PRIVATE /W3 /WX-)
+        else()
+            target_compile_options(glfw PRIVATE -Wno-error)
+        endif()
     endif()
 endif()
 

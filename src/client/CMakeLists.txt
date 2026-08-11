@@ -26,6 +26,14 @@ if(TESSERA_BUILD_APPS)
         ${CMAKE_SOURCE_DIR}/vendor/nuklear
     )
 
+    # 벤더링된 nuklear.h 는 /W4 를 통과하지 못한다(GCC -Wall -Wextra 에서는 조용함).
+    # 헤더가 클라이언트 TU 대부분에 포함되므로 타깃 단위로 해당 경고만 끈다.
+    #   C4116 괄호 없는 타입 정의 / C4127 상수 조건식
+    #   C5287 서로 다른 열거형 간 연산 / C4701 초기화되지 않았을 수 있는 지역 변수
+    if(MSVC)
+        target_compile_options(tessera PRIVATE /wd4116 /wd4127 /wd5287 /wd4701)
+    endif()
+
     # OpenGL (GLFW creates the context, but we still need to link the GL library)
     find_package(OpenGL REQUIRED)
 
@@ -39,6 +47,11 @@ if(TESSERA_BUILD_APPS)
         PRIVATE Freetype::Freetype
         PRIVATE tessera_harfbuzz
     )
+
+    # comdlg32: ui/file_picker.c 의 GetOpenFileNameW / GetSaveFileNameW
+    if(WIN32)
+        target_link_libraries(tessera PRIVATE comdlg32)
+    endif()
 
     install(TARGETS tessera RUNTIME DESTINATION bin)
 endif()
