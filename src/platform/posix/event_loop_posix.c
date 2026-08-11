@@ -18,7 +18,9 @@ struct event_loop {
 
 static uint32_t to_epoll(uint32_t interest) {
     uint32_t e = 0;
-    if (interest & EV_READ) e |= EPOLLIN;
+    /* EV_ACCEPT: listen 소켓은 연결이 도착하면 그냥 readable 해지므로 EV_READ 와
+     * 같다. 구분이 필요한 쪽은 Windows(ConnectNamedPipe) 뿐이다. */
+    if (interest & (EV_READ | EV_ACCEPT)) e |= EPOLLIN;
     if (interest & EV_EDGE) e |= EPOLLET;
     return e;
 }
@@ -48,6 +50,14 @@ int evloop_add(event_loop_t *el, int fd, uint32_t interest) {
 int evloop_del(event_loop_t *el, int fd) {
     if (!el) { errno = EINVAL; return -1; }
     return epoll_ctl(el->epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+}
+
+int evloop_mod(event_loop_t *el, int fd, uint32_t interest) {
+    if (!el) { errno = EINVAL; return -1; }
+    struct epoll_event ev;
+    ev.events  = to_epoll(interest);
+    ev.data.fd = fd;
+    return epoll_ctl(el->epoll_fd, EPOLL_CTL_MOD, fd, &ev);
 }
 
 int evloop_wait(event_loop_t *el, ev_ready_t *out, int max, int timeout_ms) {

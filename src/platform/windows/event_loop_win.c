@@ -42,8 +42,9 @@ typedef struct {
     int        fd;
     HANDLE     h;
     OVERLAPPED ov;
-    int        armed;     /* 0바이트 read 가 걸려 있는가 */
+    int        armed;     /* 0바이트 read(또는 connect)가 걸려 있는가 */
     uint32_t   interest;
+    DWORD      arm_err;   /* 무장 자체가 실패했을 때의 코드(수동 통지분) */
     char       zero;      /* ReadFile 의 형식상 버퍼(0바이트라 실제 접근 없음) */
 } watch_t;
 
@@ -67,15 +68,30 @@ static watch_t *find_watch(event_loop_t *el, int fd) {
 static int arm_watch(event_loop_t *el, watch_t *w) {
     if (w->armed) return 0;
     memset(&w->ov, 0, sizeof w->ov);
-    BOOL ok = ReadFile(w->h, &w->zero, 0, NULL, &w->ov);
-    if (!ok) {
-        DWORD err = GetLastError();
-        if (err != ERROR_IO_PENDING) {
-            /* ERROR_BROKEN_PIPE 등 — 완료 포트를 거치지 않으므로 수동 통지. */
+
+    BOOL  ok;
+    DWORD err;
+    if (w->interest & EV_ACCEPT) {
+        /* 리스너: 0바이트 read 가 아니라 연결 대기를 건다. */
+        ok  = ConnectNamedPipe(w->h, &w->ov);
+        err = ok ? ERROR_SUCCESS : GetLastError();
+        /* CreateFile 이 우리보다 먼저 연결을 끝낸 경우 — 이미 수락된 상태다. */
+        if (!ok && err == ERROR_PIPE_CONNECTED) err = ERROR_SUCCESS;
+    } else {
+        ok  = ReadFile(w->h, &w->zero, 0, NULL, &w->ov);
+        err = ok ? ERROR_SUCCESS : GetLastError();
+    }
+
+    w->arm_err = ERROR_SUCCESS;
+    if (err != ERROR_IO_PENDING) {
+        /* 완료 포트를 거치지 않는 경우들 — 직접 완료 패킷을 밀어 넣는다.
+         *   ERROR_SUCCESS + EV_ACCEPT : ConnectNamedPipe 가 즉시 끝남
+         *   그 밖의 오류(ERROR_BROKEN_PIPE 등)
+         * (EV_READ 의 동기 완료는 기본 설정상 완료 패킷이 생기므로 제외.) */
+        if (err != ERROR_SUCCESS || (w->interest & EV_ACCEPT)) {
+            w->arm_err = err;
             PostQueuedCompletionStatus(el->iocp, 0,
                                         (ULONG_PTR)(w - el->w), &w->ov);
-            w->armed = 1;
-            return 0;
         }
     }
     w->armed = 1;
@@ -138,6 +154,21 @@ int evloop_del(event_loop_t *el, int fd) {
     return 0;
 }
 
+int evloop_mod(event_loop_t *el, int fd, uint32_t interest) {
+    if (!el) { errno = EINVAL; return -1; }
+    watch_t *w = find_watch(el, fd);
+    if (!w) { errno = ENOENT; return -1; }
+
+    /* 무장 방식(ConnectNamedPipe ↔ 0바이트 read)이 달라지므로 걸린 I/O 를
+     * 취소하고 다시 건다. 핸들↔IOCP 결합은 그대로 두면 된다(해제 불가이기도 하다). */
+    if (w->armed) {
+        CancelIoEx(w->h, &w->ov);
+        w->armed = 0;
+    }
+    w->interest = interest;
+    return arm_watch(el, w);
+}
+
 int evloop_wait(event_loop_t *el, ev_ready_t *out, int max, int timeout_ms) {
     if (!el || !out || max <= 0) { errno = EINVAL; return -1; }
     if (max > EVLOOP_BATCH_MAX) max = EVLOOP_BATCH_MAX;
@@ -171,15 +202,17 @@ int evloop_wait(event_loop_t *el, ev_ready_t *out, int max, int timeout_ms) {
         w->armed = 0;
 
         uint32_t revents = EV_READ;
-        DWORD bytes = 0;
-        if (!GetOverlappedResult(w->h, &w->ov, &bytes, FALSE)) {
-            DWORD err = GetLastError();
-            if (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED ||
-                err == ERROR_HANDLE_EOF)
-                revents = EV_HANGUP;
-            else if (err != ERROR_IO_INCOMPLETE)
-                revents = EV_ERROR;
+        DWORD    err     = w->arm_err;   /* 수동 통지분은 무장 실패 코드를 쓴다 */
+        if (err == ERROR_SUCCESS) {
+            DWORD bytes = 0;
+            if (!GetOverlappedResult(w->h, &w->ov, &bytes, FALSE))
+                err = GetLastError();
         }
+        if (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED ||
+            err == ERROR_HANDLE_EOF)
+            revents = EV_HANGUP;
+        else if (err != ERROR_SUCCESS && err != ERROR_IO_INCOMPLETE)
+            revents = EV_ERROR;
 
         out[n].fd      = w->fd;
         out[n].revents = revents;

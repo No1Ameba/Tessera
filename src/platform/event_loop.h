@@ -23,6 +23,15 @@
 #define EV_ERROR   0x04u   /* 오류 — revents 전용 */
 #define EV_EDGE    0x10u   /* 엣지 트리거 요청 — evloop_add interest 전용 */
 
+/*
+ * 새 연결 대기 — listen fd 전용 interest. 연결이 도착하면 EV_READ 로 통지된다.
+ *
+ * POSIX 에서는 listen 소켓이 그냥 readable 해지므로 EV_READ 와 같다. Windows 의
+ * Named Pipe 는 "미리 만들어 둔 인스턴스에 overlapped ConnectNamedPipe 를 건다" 는
+ * 전혀 다른 동작이라, 어느 쪽을 걸어야 하는지 구현이 알아야 해서 플래그로 구분한다.
+ */
+#define EV_ACCEPT  0x20u
+
 typedef struct event_loop event_loop_t;
 
 typedef struct {
@@ -39,6 +48,15 @@ int evloop_add(event_loop_t *el, int fd, uint32_t interest);
 
 /* fd 감시 해제. 0 성공, -1 실패. */
 int evloop_del(event_loop_t *el, int fd);
+
+/*
+ * 이미 등록된 fd 의 interest 를 바꾼다. 0 성공, -1 실패.
+ *
+ * Windows 에서 수락된 Named Pipe 인스턴스를 리스너(EV_ACCEPT)에서 클라이언트
+ * 연결(EV_READ)로 전환할 때 쓴다. del+add 로는 안 되는데, 핸들은 한 번 IOCP 에
+ * 묶이면 해제할 수 없어 다시 add 하면 실패하기 때문이다.
+ */
+int evloop_mod(event_loop_t *el, int fd, uint32_t interest);
 
 /*
  * 최대 max 개의 준비된 이벤트를 out[] 에 채우고 개수를 반환한다.

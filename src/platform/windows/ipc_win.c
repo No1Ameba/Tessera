@@ -30,30 +30,44 @@ int ipc_socket_path(char *buf, size_t buflen) {
     return 0;
 }
 
-int ipc_listen_socket(const char *path) {
-    if (!path) return -1;
+/* 다음 인스턴스를 만들려면 파이프 이름이 필요하다. 데몬의 리스너는 하나뿐이다. */
+static char g_pipe_name[256];
+
+/* 이름 있는 파이프 인스턴스를 하나 만들어 fd 로 감싼다. */
+static int make_instance(const char *path) {
     HANDLE h = CreateNamedPipeA(
         path,
         PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
         PIPE_UNLIMITED_INSTANCES,
         65536, 65536, 0, NULL);
-    if (h == INVALID_HANDLE_VALUE) return -1;
+    if (h == INVALID_HANDLE_VALUE) { errno = EIO; return -1; }
     int fd = _open_osfhandle((intptr_t)h, _O_RDWR);
-    if (fd < 0) { CloseHandle(h); return -1; }
+    if (fd < 0) { CloseHandle(h); errno = EMFILE; return -1; }
     return fd;
 }
 
-int ipc_accept_client(int listen_fd) {
-    HANDLE h = (HANDLE)_get_osfhandle(listen_fd);
-    if (h == INVALID_HANDLE_VALUE) return -1;
-    /* 클라이언트 연결 대기(간이 blocking). 실 데몬에서는 overlapped +
-     * IOCP 로 대체해야 한다. */
-    BOOL ok = ConnectNamedPipe(h, NULL);
-    if (!ok && GetLastError() != ERROR_PIPE_CONNECTED) return -1;
-    /* 이 인스턴스를 클라이언트 통신 fd 로 반환한다. 다음 연결용 새 인스턴스는
-     * 호출자가 다시 ipc_listen_socket() 으로 생성해야 한다(간이 모델). */
-    return listen_fd;
+int ipc_listen_socket(const char *path) {
+    if (!path) { errno = EINVAL; return -1; }
+    int r = snprintf(g_pipe_name, sizeof g_pipe_name, "%s", path);
+    if (r < 0 || (size_t)r >= sizeof g_pipe_name) { errno = ENAMETOOLONG; return -1; }
+    return make_instance(g_pipe_name);
+}
+
+/*
+ * Named Pipe 는 대기하던 인스턴스가 곧 연결이다. 연결 자체는 이벤트 루프가
+ * EV_ACCEPT(overlapped ConnectNamedPipe)로 이미 완료시켜 두었으므로, 여기서는
+ * 소유권만 넘기고 다음 연결용 인스턴스를 새로 만든다.
+ */
+int ipc_accept_client(int *listen_fd) {
+    if (!listen_fd || *listen_fd < 0) { errno = EINVAL; return -1; }
+
+    int accepted = *listen_fd;
+    int next = make_instance(g_pipe_name);
+    if (next < 0) return -1;   /* 리스너를 유지한 채 실패 — 이번 연결만 포기 */
+
+    *listen_fd = next;
+    return accepted;
 }
 
 void ipc_close_socket(int fd, const char *path) {

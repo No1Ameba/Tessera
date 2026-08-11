@@ -74,11 +74,14 @@ int ipc_listen_socket(const char *path) {
     return fd;
 }
 
-int ipc_accept_client(int listen_fd) {
+int ipc_accept_client(int *listen_fd) {
+    if (!listen_fd) { errno = EINVAL; return -1; }
+
     struct sockaddr_un addr;
     socklen_t addrlen = sizeof(addr);
 
-    int cfd = accept(listen_fd, (struct sockaddr *)&addr, &addrlen);
+    /* POSIX: listen fd 는 그대로 두고 새 fd 만 돌려준다. */
+    int cfd = accept(*listen_fd, (struct sockaddr *)&addr, &addrlen);
     if (cfd < 0) return -1;
 
     int flags = fcntl(cfd, F_GETFL, 0);

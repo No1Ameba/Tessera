@@ -44,11 +44,24 @@ int ipc_socket_path(char *buf, size_t buflen);
 int ipc_listen_socket(const char *path);
 
 /*
- * 대기 중인 클라이언트 연결을 수락하고 O_NONBLOCK 을 설정한다.
+ * 대기 중인 클라이언트 연결을 수락한다.
  *
- * @return  연결된 클라이언트 fd (>= 0), 실패 시 -1.
+ * @param listen_fd  [in/out] listen fd. **Windows 에서는 값이 바뀔 수 있다.**
+ * @return           연결된 클라이언트 fd (>= 0), 실패 시 -1.
+ *
+ * POSIX 는 accept(2) 가 새 fd 를 주고 listen fd 는 그대로다 — *listen_fd 는
+ * 변하지 않는다.
+ *
+ * Windows 의 Named Pipe 는 모델이 다르다. 연결이 도착하면 **대기하던 인스턴스
+ * 자체가** 그 연결이 되므로, 그것을 클라이언트 fd 로 돌려주고 다음 연결을 받을
+ * 새 인스턴스를 만들어 *listen_fd 에 넣는다.
+ *
+ * 따라서 호출자는 수락 후 *listen_fd 가 바뀌었는지 보고, 바뀌었다면
+ *   - 반환된 fd(= 이전 listen fd)를 evloop_mod(..., EV_READ) 로 전환하고
+ *   - 새 *listen_fd 를 evloop_add(..., EV_ACCEPT) 로 등록해야 한다.
+ * 바뀌지 않았다면(POSIX) 반환된 fd 를 EV_READ 로 새로 등록하면 된다.
  */
-int ipc_accept_client(int listen_fd);
+int ipc_accept_client(int *listen_fd);
 
 /*
  * 소켓 fd 를 닫고 path 의 소켓 파일을 삭제한다.
