@@ -49,3 +49,12 @@ target_include_directories(test_screen PRIVATE
     ${CMAKE_SOURCE_DIR}/src/client
     ${CMAKE_SOURCE_DIR}/src/common)
 add_test(NAME screen COMMAND test_screen)
+
+add_executable(test_status_bar test_status_bar.c
+    ${CMAKE_SOURCE_DIR}/src/client/ui/status_bar.c)
+target_include_directories(test_status_bar PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/client
+    ${CMAKE_SOURCE_DIR}/src/common)
+target_link_libraries(test_status_bar PRIVATE tessera_common tessera_cjson)
+add_test(NAME status_bar COMMAND test_status_bar)

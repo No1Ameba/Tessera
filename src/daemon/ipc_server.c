@@ -53,6 +53,15 @@ typedef struct {
     uint8_t  ring[PANE_RING_SIZE];
     size_t   ring_head;   /* 다음 쓰기 위치 */
     size_t   ring_count;  /* 저장된 바이트 수 */
+
+    /*
+     * 클라이언트별로 요청한 크기. 인덱스는 srv->clients 슬롯 인덱스와 같다.
+     * PTY 는 하나뿐이므로 여러 클라이언트가 붙으면 최소값으로 클램프한다
+     * (tmux 기본 동작). 더 큰 클라이언트에는 남는 영역이 여백으로 보인다.
+     * 0 = 해당 클라이언트가 이 pane 에 대해 요청한 적 없음.
+     */
+    uint16_t req_cols[IPC_MAX_CLIENTS];
+    uint16_t req_rows[IPC_MAX_CLIENTS];
 } ipc_pane_slot_t;
 
 struct ipc_server {
@@ -136,6 +145,13 @@ static ipc_client_slot_t *client_by_fd(ipc_server_t *srv, int fd) {
     return NULL;
 }
 
+/* 클라이언트 슬롯 인덱스 (pane 별 요청 크기 테이블의 키). 없으면 -1. */
+static int client_index_by_fd(ipc_server_t *srv, int fd) {
+    for (int i = 0; i < IPC_MAX_CLIENTS; i++)
+        if (srv->clients[i].fd == fd) return i;
+    return -1;
+}
+
 static ipc_client_slot_t *client_empty_slot(ipc_server_t *srv) {
     for (int i = 0; i < IPC_MAX_CLIENTS; i++)
         if (srv->clients[i].fd < 0) return &srv->clients[i];
@@ -156,8 +172,15 @@ static ipc_pane_slot_t *pane_by_id(ipc_server_t *srv, uint32_t pane_id) {
 }
 
 static ipc_pane_slot_t *pane_empty_slot(ipc_server_t *srv) {
-    for (int i = 0; i < IPC_MAX_PANES; i++)
-        if (srv->panes[i].pty_fd < 0) return &srv->panes[i];
+    for (int i = 0; i < IPC_MAX_PANES; i++) {
+        if (srv->panes[i].pty_fd < 0) {
+            /* 슬롯은 재사용되므로 이전 pane 의 크기 요청을 반드시 지운다.
+             * 남아 있으면 새 pane 이 엉뚱한 크기로 클램프된다. */
+            memset(srv->panes[i].req_cols, 0, sizeof(srv->panes[i].req_cols));
+            memset(srv->panes[i].req_rows, 0, sizeof(srv->panes[i].req_rows));
+            return &srv->panes[i];
+        }
+    }
     return NULL;
 }
 
@@ -584,6 +607,64 @@ static void handle_pane_destroy(ipc_server_t *srv, int client_fd,
     session_destroy_if_empty(srv, s);
 }
 
+/* ── pane 크기 협상 (다중 클라이언트 최소 클램프) ─────────────────────────── */
+
+/*
+ * 이 pane 에 대해 클라이언트들이 요청한 크기의 최소값.
+ * 요청이 하나도 없으면 두 출력 모두 0 으로 둔다.
+ */
+static void pane_min_size(const ipc_pane_slot_t *slot,
+                           uint16_t *out_cols, uint16_t *out_rows)
+{
+    uint16_t mc = 0, mr = 0;
+    for (int i = 0; i < IPC_MAX_CLIENTS; i++) {
+        uint16_t c = slot->req_cols[i], r = slot->req_rows[i];
+        if (c == 0 || r == 0) continue;   /* 요청 없음 */
+        if (mc == 0 || c < mc) mc = c;
+        if (mr == 0 || r < mr) mr = r;
+    }
+    *out_cols = mc;
+    *out_rows = mr;
+}
+
+/* 최소 크기를 실제 pane/PTY 에 적용한다. 변화가 없으면 아무 일도 하지 않는다. */
+static void pane_apply_min_size(ipc_server_t *srv, ipc_pane_slot_t *slot)
+{
+    uint16_t cols, rows;
+    pane_min_size(slot, &cols, &rows);
+    if (cols == 0 || rows == 0) return;   /* 붙어 있는 클라이언트 없음 */
+
+    session_t *s = session_find_by_id(srv->session_mgr, slot->session_id);
+    if (!s) return;
+    window_t *w = window_find_by_id(s, slot->window_id);
+    if (!w) return;
+    pane_t *p = pane_find_by_id(w, slot->pane_id);
+    if (!p) return;
+    if (p->cols == cols && p->rows == rows) return;
+
+    pane_resize(p, cols, rows);
+    if (slot->pty_fd >= 0) {
+        pty_t pty = { .master_fd = slot->pty_fd, .child_pid = (pid_t)p->pid };
+        pty_resize(&pty, cols, rows);
+    }
+}
+
+/* 떠나는 클라이언트의 크기 요청을 모두 지우고 각 pane 을 재협상한다. */
+static void pane_drop_client_sizes(ipc_server_t *srv, int client_idx)
+{
+    if (client_idx < 0 || client_idx >= IPC_MAX_CLIENTS) return;
+    for (int i = 0; i < IPC_MAX_PANES; i++) {
+        ipc_pane_slot_t *slot = &srv->panes[i];
+        if (slot->pty_fd < 0) continue;   /* 비어 있는 슬롯 */
+        if (slot->req_cols[client_idx] == 0 && slot->req_rows[client_idx] == 0)
+            continue;
+        slot->req_cols[client_idx] = 0;
+        slot->req_rows[client_idx] = 0;
+        /* 가장 작던 클라이언트가 빠졌다면 남은 클라이언트 크기로 늘어난다. */
+        pane_apply_min_size(srv, slot);
+    }
+}
+
 static void handle_pane_resize(ipc_server_t *srv, int client_fd,
                                 const uint8_t *payload, uint16_t plen) {
     if (plen < sizeof(ipc_payload_pane_resize_t)) {
@@ -613,12 +694,19 @@ static void handle_pane_resize(ipc_server_t *srv, int client_fd,
         return;
     }
 
-    pane_resize(p, req->cols, req->rows);
-
+    /* 요청은 "이 클라이언트가 원하는 크기" 로만 기록하고, 실제 PTY 크기는
+     * 붙어 있는 모든 클라이언트 요청의 최소값으로 정한다. */
     ipc_pane_slot_t *slot = pane_by_id(srv, p->id);
-    if (slot && slot->pty_fd >= 0) {
-        pty_t pty = { .master_fd = slot->pty_fd, .child_pid = (pid_t)p->pid };
-        pty_resize(&pty, req->cols, req->rows);
+    if (slot) {
+        int ci = client_index_by_fd(srv, client_fd);
+        if (ci >= 0) {
+            slot->req_cols[ci] = req->cols;
+            slot->req_rows[ci] = req->rows;
+        }
+        pane_apply_min_size(srv, slot);
+    } else {
+        /* 슬롯이 아직 없으면(스폰 전) 요청값을 그대로 반영해 둔다. */
+        pane_resize(p, req->cols, req->rows);
     }
 
     send_ok(client_fd);
@@ -721,30 +809,54 @@ static void handle_session_attach(ipc_server_t *srv, int client_fd,
         }
     }
 
-    /* 응답 전송: 헤더 + pane 배열 */
-    /* 첫 윈도우의 layout blob 을 동봉한다 (현재 구조는 세션당 단일 윈도우 사용). */
-    window_t *first_w = s->windows;
-    const uint8_t *lb = first_w ? first_w->layout_blob : NULL;
-    uint16_t lb_len = first_w ? first_w->layout_blob_len : 0;
+    /* window 목록 수집 — 각 window 의 layout blob 을 모두 동봉한다. */
+    ipc_attach_window_info_t wins[IPC_MAX_WINDOWS];
+    int    win_count = 0;
+    size_t blob_total = 0;
+    for (window_t *w = s->windows; w && win_count < IPC_MAX_WINDOWS; w = w->next) {
+        uint16_t bl = w->layout_blob ? w->layout_blob_len : 0;
+        /* 페이로드 상한(UINT16_MAX)을 넘길 blob 은 싣지 않는다 — 해당 window 는
+         * 클라이언트에서 flat split 로 폴백된다. */
+        if (blob_total + bl > IPC_ATTACH_BLOB_MAX) bl = 0;
+        memset(&wins[win_count], 0, sizeof(wins[0]));
+        wins[win_count].window_id = w->id;
+        strncpy(wins[win_count].name, w->name, sizeof(wins[0].name) - 1);
+        wins[win_count].blob_len = bl;
+        blob_total += bl;
+        win_count++;
+    }
 
     ipc_payload_session_attach_r_t resp;
     memset(&resp, 0, sizeof(resp));
-    resp.session_id = s->id;
-    resp.pane_count = (uint32_t)pane_count;
+    resp.session_id       = s->id;
+    resp.pane_count       = (uint32_t)pane_count;
+    resp.window_count     = (uint32_t)win_count;
+    resp.active_window_id = s->active_window ? s->active_window->id : 0;
     strncpy(resp.session_name, s->name, sizeof(resp.session_name) - 1);
-    resp.layout_blob_len = lb_len;
 
-    size_t arr_sz = (size_t)pane_count * sizeof(ipc_attach_pane_info_t);
-    uint16_t total = (uint16_t)(sizeof(resp) + arr_sz + lb_len);
+    size_t pane_sz = (size_t)pane_count * sizeof(ipc_attach_pane_info_t);
+    size_t win_sz  = (size_t)win_count  * sizeof(ipc_attach_window_info_t);
+    uint16_t total = (uint16_t)(sizeof(resp) + pane_sz + win_sz + blob_total);
     ipc_msg_header_t hdr = IPC_HEADER_INIT(IPC_MSG_SESSION_ATTACH_R, total);
 
-    uint8_t buf[sizeof(hdr) + sizeof(resp) + sizeof(panes) + UINT16_MAX];
-    memcpy(buf, &hdr, sizeof(hdr));
-    memcpy(buf + sizeof(hdr), &resp, sizeof(resp));
-    memcpy(buf + sizeof(hdr) + sizeof(resp), panes, arr_sz);
-    if (lb_len > 0 && lb)
-        memcpy(buf + sizeof(hdr) + sizeof(resp) + arr_sz, lb, lb_len);
-    write_all_retry(client_fd, buf, sizeof(hdr) + total);
+    uint8_t buf[sizeof(hdr) + sizeof(resp) + sizeof(panes) + sizeof(wins)
+                + IPC_ATTACH_BLOB_MAX];
+    size_t off = 0;
+    memcpy(buf + off, &hdr,  sizeof(hdr));  off += sizeof(hdr);
+    memcpy(buf + off, &resp, sizeof(resp)); off += sizeof(resp);
+    memcpy(buf + off, panes, pane_sz);      off += pane_sz;
+    memcpy(buf + off, wins,  win_sz);       off += win_sz;
+    /* blob 들은 window_info 배열과 같은 순서로 연접한다. */
+    {
+        int i = 0;
+        for (window_t *w = s->windows; w && i < win_count; w = w->next, i++) {
+            if (wins[i].blob_len > 0 && w->layout_blob) {
+                memcpy(buf + off, w->layout_blob, wins[i].blob_len);
+                off += wins[i].blob_len;
+            }
+        }
+    }
+    write_all_retry(client_fd, buf, off);
 
     /* 이 클라이언트를 세션에 attach 상태로 기록 (수명 관리용) */
     client_set_session(srv, client_by_fd(srv, client_fd), s->id);
@@ -974,6 +1086,9 @@ static void dispatch_message(ipc_server_t *srv, int client_fd,
 /* ─── 클라이언트 데이터 수신 ─────────────────────────────────────────────── */
 
 static void client_remove(ipc_server_t *srv, ipc_client_slot_t *c) {
+    /* 이 클라이언트의 크기 요청을 걷어내고 남은 클라이언트 기준으로 재협상.
+     * (가장 작던 클라이언트가 나가면 pane 이 다시 커진다.) */
+    pane_drop_client_sizes(srv, (int)(c - srv->clients));
     /* 세션 attach 해제 (last_detach_ms 갱신) */
     client_set_session(srv, c, 0);
     loop_del(srv, c->fd);
@@ -1103,6 +1218,11 @@ static void pty_output_read(ipc_server_t *srv, int pty_fd) {
         window_t  *w = s ? window_find_by_id(s, slot->window_id) : NULL;
         pane_t    *p = w ? pane_find_by_id(w, slot->pane_id)    : NULL;
         if (p) pane_destroy(w, p);
+
+        /* window 의 마지막 pane 이었으면 빈 window 도 제거한다.
+         * 남겨두면 window_count 와 스냅샷에 빈 window 가 쌓인다. */
+        if (w && w->pane_count == 0 && s && s->window_count > 0)
+            window_destroy(s, w);
 
         /* 세션의 마지막 pane 이었으면 세션 자체도 제거 (useless empty session 방지) */
         if (s) session_destroy_if_empty(srv, s);

@@ -18,6 +18,7 @@ if(TESSERA_BUILD_APPS)
         ui/file_picker.c
         ui/confirm_dialog.c
         ui/ui_overlay.c
+        ui/status_bar.c
     )
 
     target_include_directories(tessera PRIVATE

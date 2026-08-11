@@ -71,22 +71,45 @@ int ipc_client_session_destroy(ipc_client_t *c, uint32_t session_id);
 int ipc_client_session_list(ipc_client_t *c,
                              ipc_session_info_t *buf, int max, int *out_count);
 
+/* ── 세션 attach ─────────────────────────────────────────────────────────── */
+
+#define IPC_CLIENT_MAX_ATTACH_PANES  64
+
+/* attach 응답에서 뽑아낸 window 하나. layout blob 은 결과의 blobs[] 안에 있다. */
+typedef struct {
+    uint32_t window_id;
+    char     name[64];
+    uint32_t blob_off;   /* ipc_attach_result_t.blobs 내 시작 오프셋 */
+    uint16_t blob_len;   /* 0 = layout 정보 없음 */
+} ipc_client_win_t;
+
+/*
+ * attach 결과 일체 — 세션의 모든 pane 과 window(+layout blob).
+ * 호출자가 스택에 두고 쓸 수 있는 크기(약 12 KB)다.
+ */
+typedef struct {
+    uint32_t session_id;
+    char     session_name[64];
+    uint32_t active_window_id;   /* 0 = 지정 없음 */
+
+    int      pane_count;
+    ipc_attach_pane_info_t panes[IPC_CLIENT_MAX_ATTACH_PANES];
+
+    int      window_count;
+    ipc_client_win_t windows[IPC_MAX_WINDOWS];
+
+    uint8_t  blobs[IPC_ATTACH_BLOB_MAX];
+    uint32_t blobs_len;
+} ipc_attach_result_t;
+
 /*
  * 기존 세션에 attach한다.
- * pane 목록을 받고, daemon이 PTY 출력 히스토리를 replay한다.
+ * 세션의 전체 window 구성과 pane 목록을 받는다. PTY 출력 히스토리는
+ * pane_slot 생성 후 ipc_client_pane_replay() 로 따로 요청한다.
  * @return 0 success, -1 failure.
  */
 int ipc_client_session_attach(ipc_client_t *c, uint32_t session_id,
-                               ipc_attach_pane_info_t *panes_out, int max_panes,
-                               int *out_count);
-
-/* attach 시 layout blob 도 함께 받는다 (있으면). blob_buf=NULL 이면 무시.
- * @return 0 success, -1 failure. *out_blob_len 에 blob 바이트 수 설정. */
-int ipc_client_session_attach_ex(ipc_client_t *c, uint32_t session_id,
-                                  ipc_attach_pane_info_t *panes_out, int max_panes,
-                                  int *out_count,
-                                  uint8_t *blob_buf, size_t blob_buf_size,
-                                  uint16_t *out_blob_len);
+                               ipc_attach_result_t *out);
 
 /*
  * pane의 PTY 출력 히스토리를 요청한다.
