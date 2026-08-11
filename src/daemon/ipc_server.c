@@ -5,7 +5,7 @@
 #include "../common/ipc_proto.h"
 #include "../common/session_file.h"
 #include "../common/mono_time.h"
-#include <dirent.h>
+#include "../common/paths.h"
 #include "../platform/ipc.h"
 #include "../platform/tessera_pty.h"
 #include "../platform/event_loop.h"
@@ -15,10 +15,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <poll.h>
-#include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
+
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#  include <io.h>          /* _close */
+#  include <process.h>     /* _getpid */
+#  define close  _close
+#  define getpid _getpid
+#else
+#  include <dirent.h>
+#  include <sys/stat.h>
+#  include <unistd.h>
+#endif
 
 /* ─── 상수 ───────────────────────────────────────────────────────────────── */
 
@@ -81,6 +91,7 @@ struct ipc_server {
 };
 
 static int write_all_retry(int fd, const void *buf, size_t len);
+static void read_pane_cwd(int pid, char *out, size_t out_size);
 
 static int64_t mono_ms(void) {
     return tessera_mono_ms();
@@ -188,9 +199,9 @@ static ipc_pane_slot_t *pane_empty_slot(ipc_server_t *srv) {
 static int send_msg(int fd, ipc_msg_type_t type,
                     const void *payload, uint16_t plen) {
     ipc_msg_header_t hdr = IPC_HEADER_INIT(type, plen);
-    if (write(fd, &hdr, sizeof(hdr)) != (ssize_t)sizeof(hdr)) return -1;
+    if (write_all_retry(fd, &hdr, sizeof(hdr)) != 0) return -1;
     if (plen > 0 && payload)
-        if (write(fd, payload, plen) != (ssize_t)plen) return -1;
+        if (write_all_retry(fd, payload, plen) != 0) return -1;
     return 0;
 }
 
@@ -392,7 +403,7 @@ static void handle_window_destroy(ipc_server_t *srv, int client_fd,
         ipc_pane_slot_t *slot = pane_by_id(srv, p->id);
         if (slot) {
             loop_del(srv, slot->pty_fd);
-            pty_t pty = { .master_fd = slot->pty_fd, .child_pid = (pid_t)p->pid };
+            pty_t pty = { .master_fd = slot->pty_fd, .child_pid = p->pid };
             pty_close(&pty, NULL);
             slot->pty_fd = -1;
         }
@@ -549,8 +560,8 @@ static void handle_pane_create(ipc_server_t *srv, int client_fd,
         for (int i = 0; i < IPC_MAX_CLIENTS; i++) {
             int cfd = srv->clients[i].fd;
             if (cfd < 0 || cfd == client_fd) continue;
-            write(cfd, &nhdr,   sizeof(nhdr));
-            write(cfd, &notify, sizeof(notify));
+            write_all_retry(cfd, &nhdr,   sizeof(nhdr));
+            write_all_retry(cfd, &notify, sizeof(notify));
         }
     }
 }
@@ -587,7 +598,7 @@ static void handle_pane_destroy(ipc_server_t *srv, int client_fd,
     ipc_pane_slot_t *slot = pane_by_id(srv, p->id);
     if (slot) {
         loop_del(srv, slot->pty_fd);
-        pty_t pty = { .master_fd = slot->pty_fd, .child_pid = (pid_t)p->pid };
+        pty_t pty = { .master_fd = slot->pty_fd, .child_pid = p->pid };
         pty_close(&pty, NULL);
         slot->pty_fd = -1;
     }
@@ -600,8 +611,8 @@ static void handle_pane_destroy(ipc_server_t *srv, int client_fd,
     for (int i = 0; i < IPC_MAX_CLIENTS; i++) {
         int cfd = srv->clients[i].fd;
         if (cfd < 0 || cfd == client_fd) continue;
-        write(cfd, &nhdr, sizeof(nhdr));
-        write(cfd, &nref, sizeof(nref));
+        write_all_retry(cfd, &nhdr, sizeof(nhdr));
+        write_all_retry(cfd, &nref, sizeof(nref));
     }
 
     pane_destroy(w, p);
@@ -647,7 +658,7 @@ static void pane_apply_min_size(ipc_server_t *srv, ipc_pane_slot_t *slot)
 
     pane_resize(p, cols, rows);
     if (slot->pty_fd >= 0) {
-        pty_t pty = { .master_fd = slot->pty_fd, .child_pid = (pid_t)p->pid };
+        pty_t pty = { .master_fd = slot->pty_fd, .child_pid = p->pid };
         pty_resize(&pty, cols, rows);
     }
 }
@@ -907,13 +918,8 @@ static void handle_session_save(ipc_server_t *srv, int client_fd,
             sp->rows = p->rows;
             if (p == w->active_pane) ap_idx = pi;
 
-            /* /proc/<pid>/cwd로 작업 디렉토리 읽기 */
-            if (p->pid > 0) {
-                char proc_path[64];
-                snprintf(proc_path, sizeof proc_path, "/proc/%d/cwd", p->pid);
-                ssize_t len = readlink(proc_path, sp->cwd, SNAP_CWD_MAX - 1);
-                if (len > 0) sp->cwd[len] = '\0';
-            }
+            if (p->pid > 0)
+                read_pane_cwd((int)p->pid, sp->cwd, SNAP_CWD_MAX);
         }
         sw->pane_count = pi;
         sw->active_pane = ap_idx;
@@ -922,8 +928,12 @@ static void handle_session_save(ipc_server_t *srv, int client_fd,
     snap.active_window = aw_idx;
 
     /* 임시 파일에 JSON 직렬화 후 읽어서 전송 */
-    char tmp_path[64];
-    snprintf(tmp_path, sizeof tmp_path, "/tmp/tessera-snap-%d.json", (int)getpid());
+    char tmp_path[512];
+    if (tessera_temp_path("tessera-snap", tmp_path, sizeof tmp_path) != 0) {
+        send_error(client_fd, IPC_MSG_SESSION_SAVE,
+                   IPC_ERR_UNKNOWN, "temp path failed");
+        return;
+    }
     if (session_snapshot_save(tmp_path, &snap) != 0) {
         send_error(client_fd, IPC_MSG_SESSION_SAVE,
                    IPC_ERR_UNKNOWN, "snapshot serialize failed");
@@ -933,7 +943,7 @@ static void handle_session_save(ipc_server_t *srv, int client_fd,
     if (!fp) {
         send_error(client_fd, IPC_MSG_SESSION_SAVE,
                    IPC_ERR_UNKNOWN, "snapshot read failed");
-        unlink(tmp_path);
+        remove(tmp_path);
         return;
     }
     fseek(fp, 0, SEEK_END);
@@ -941,20 +951,20 @@ static void handle_session_save(ipc_server_t *srv, int client_fd,
     fseek(fp, 0, SEEK_SET);
     if (json_len <= 0 || json_len > IPC_MAX_PAYLOAD_LEN) {
         fclose(fp);
-        unlink(tmp_path);
+        remove(tmp_path);
         send_error(client_fd, IPC_MSG_SESSION_SAVE,
                    IPC_ERR_UNKNOWN, "snapshot too large");
         return;
     }
     char *json_buf = malloc((size_t)json_len);
-    if (!json_buf) { fclose(fp); unlink(tmp_path); return; }
+    if (!json_buf) { fclose(fp); remove(tmp_path); return; }
     fread(json_buf, 1, (size_t)json_len, fp);
     fclose(fp);
-    unlink(tmp_path);
+    remove(tmp_path);
 
     ipc_msg_header_t hdr = IPC_HEADER_INIT(IPC_MSG_SESSION_SAVE_R, (uint16_t)json_len);
-    write(client_fd, &hdr, sizeof hdr);
-    write(client_fd, json_buf, (size_t)json_len);
+    write_all_retry(client_fd, &hdr, sizeof hdr);
+    write_all_retry(client_fd, json_buf, (size_t)json_len);
     free(json_buf);
 }
 
@@ -963,11 +973,10 @@ static int write_all_retry(int fd, const void *buf, size_t len) {
     const uint8_t *p = buf;
     size_t sent = 0;
     while (sent < len) {
-        ssize_t w = write(fd, p + sent, len - sent);
+        ssize_t w = ipc_write(fd, p + sent, len - sent);
         if (w > 0) { sent += (size_t)w; continue; }
         if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
-            struct pollfd pf = { fd, POLLOUT, 0 };
-            if (poll(&pf, 1, 500) <= 0) return -1;
+            if (ipc_wait_writable(fd, 500) <= 0) return -1;
             continue;
         }
         return -1;
@@ -1105,7 +1114,7 @@ static void client_read(ipc_server_t *srv, ipc_client_slot_t *c) {
         size_t space = sizeof(c->rbuf) - c->rbuf_len;
         if (space == 0) break;  /* 버퍼 꽉 참 */
 
-        ssize_t n = read(c->fd, c->rbuf + c->rbuf_len, space);
+        ssize_t n = ipc_read(c->fd, c->rbuf + c->rbuf_len, space);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
             client_remove(srv, c);
@@ -1183,12 +1192,11 @@ static void pty_output_read(ipc_server_t *srv, int pty_fd) {
                 /* 재시도 루프: non-blocking 소켓에서 partial write 처리 */
                 size_t sent = 0;
                 while (sent < msg_len) {
-                    ssize_t w = write(cfd, msg + sent, msg_len - sent);
+                    ssize_t w = ipc_write(cfd, msg + sent, msg_len - sent);
                     if (w > 0) { sent += (size_t)w; continue; }
                     if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                         /* 잠깐 대기 후 재시도 (bridge/SSH 느린 경우) */
-                        struct pollfd pf = { cfd, POLLOUT, 0 };
-                        if (poll(&pf, 1, 100) <= 0) break; /* 100ms 타임아웃 */
+                        if (ipc_wait_writable(cfd, 100) <= 0) break;
                         continue;
                     }
                     break; /* 에러 */
@@ -1207,8 +1215,8 @@ static void pty_output_read(ipc_server_t *srv, int pty_fd) {
         for (int i = 0; i < IPC_MAX_CLIENTS; i++) {
             int cfd = srv->clients[i].fd;
             if (cfd < 0) continue;
-            write(cfd, &notify, sizeof(notify));
-            write(cfd, &ref,    sizeof(ref));
+            write_all_retry(cfd, &notify, sizeof(notify));
+            write_all_retry(cfd, &ref,    sizeof(ref));
         }
 
         /* epoll 제거 + pty 닫기 */
@@ -1340,14 +1348,40 @@ static int restore_one_snapshot(ipc_server_t *srv, const session_snapshot_t *sna
     return 0;
 }
 
-/* ~/.config/tessera/sessions/<name>.json 경로 조립. home 없으면 -1. */
+/* <설정 디렉토리>/sessions/<name>.json 경로 조립. 실패 시 -1. */
 static int snapshot_path(const char *sess_name, char *out, size_t out_size)
 {
-    const char *home = getenv("HOME");
-    if (!home) return -1;
-    int n = snprintf(out, out_size, "%s/.config/tessera/sessions/%s.json",
-                     home, sess_name);
-    return (n > 0 && (size_t)n < out_size) ? 0 : -1;
+    char rel[256];
+    int n = snprintf(rel, sizeof rel, "sessions/%s.json", sess_name);
+    if (n < 0 || (size_t)n >= sizeof rel) return -1;
+    return tessera_config_path(rel, out, out_size);
+}
+
+/* 스냅샷 디렉토리(<설정 디렉토리>/sessions)를 만들고 경로를 돌려준다. */
+static int sessions_dir(char *out, size_t out_size, int create)
+{
+    if (tessera_config_path("sessions", out, out_size) != 0) return -1;
+    if (create && tessera_mkdir_p(out) != 0) return -1;
+    return 0;
+}
+
+/*
+ * 자식 셸의 현재 작업 디렉토리를 읽는다. 실패하면 out 을 건드리지 않는다.
+ *
+ * Windows 에는 다른 프로세스의 CWD 를 얻는 공개 API 가 없다(PEB 를 직접 읽어야
+ * 하고 PROCESS_VM_READ 권한과 비트수 일치가 필요하다). 세션 복원 시 디렉토리가
+ * 복구되지 않을 뿐 나머지는 정상 동작하므로 비워 둔다.
+ */
+static void read_pane_cwd(int pid, char *out, size_t out_size)
+{
+#ifdef _WIN32
+    (void)pid; (void)out; (void)out_size;   /* TODO(windows): OSC 7 로 대체 */
+#else
+    char proc_path[64];
+    snprintf(proc_path, sizeof proc_path, "/proc/%d/cwd", pid);
+    ssize_t len = readlink(proc_path, out, out_size - 1);
+    if (len > 0) out[len] = '\0';
+#endif
 }
 
 /* 세션이 영구 소멸 시 디스크 스냅샷도 제거 (재시작 후 복원 방지). */
@@ -1355,17 +1389,14 @@ static void delete_session_snapshot(const char *sess_name)
 {
     char p[512];
     if (snapshot_path(sess_name, p, sizeof p) == 0)
-        unlink(p);
+        remove(p);
 }
 
 /* 모든 활성 세션을 디스크에 저장한다. auto-save 와 shutdown-save 공용. */
 static void save_all_sessions(ipc_server_t *srv)
 {
-    const char *home = getenv("HOME");
-    if (!home) return;
-    char dir[256];
-    snprintf(dir, sizeof dir, "%s/.config/tessera/sessions", home);
-    mkdir(dir, 0755);
+    char dir[512];
+    if (sessions_dir(dir, sizeof dir, /*create=*/1) != 0) return;
     for (session_t *s = srv->session_mgr->head; s; s = s->next) {
         session_snapshot_t snap;
         memset(&snap, 0, sizeof snap);
@@ -1378,55 +1409,71 @@ static void save_all_sessions(ipc_server_t *srv)
             for (pane_t *p = w->panes; p && pi < SNAP_MAX_PANES; p = p->next, pi++) {
                 sw->panes[pi].cols = p->cols;
                 sw->panes[pi].rows = p->rows;
-                if (p->pid > 0) {
-                    char pp[64];
-                    snprintf(pp, sizeof pp, "/proc/%d/cwd", p->pid);
-                    ssize_t l = readlink(pp, sw->panes[pi].cwd, SNAP_CWD_MAX - 1);
-                    if (l > 0) sw->panes[pi].cwd[l] = '\0';
-                }
+                if (p->pid > 0)
+                    read_pane_cwd((int)p->pid, sw->panes[pi].cwd, SNAP_CWD_MAX);
             }
             sw->pane_count = pi;
         }
         snap.window_count = wi;
-        char fpath[512];
+        char fpath[768];
         snprintf(fpath, sizeof fpath, "%s/%s.json", dir, s->name);
         session_snapshot_save(fpath, &snap);
     }
+}
+
+/* 스냅샷 파일 하나를 읽어 복원한다. @return 복원했으면 1, 아니면 0. */
+static int restore_json_file(ipc_server_t *srv, const char *dir, const char *name)
+{
+    char fpath[1024];
+    int n = snprintf(fpath, sizeof fpath, "%s/%s", dir, name);
+    if (n < 0 || (size_t)n >= sizeof fpath) return 0;
+
+    session_snapshot_t snap;
+    memset(&snap, 0, sizeof snap);
+    if (session_snapshot_load(fpath, &snap) != 0) return 0;
+    if (restore_one_snapshot(srv, &snap) != 0) return 0;
+
+    fprintf(stderr, "[tessera-daemon] restored session '%s' (%d windows)\n",
+            snap.name, snap.window_count);
+    return 1;
 }
 
 int ipc_server_restore_sessions(ipc_server_t *srv)
 {
     if (!srv) return 0;
 
-    const char *home = getenv("HOME");
-    if (!home) return 0;
     char dir[512];
-    snprintf(dir, sizeof dir, "%s/.config/tessera/sessions", home);
+    if (sessions_dir(dir, sizeof dir, /*create=*/0) != 0) return 0;
 
+    int restored = 0;
+
+    /* 디렉토리의 *.json 을 순회하며 스냅샷을 복원한다. 열거 방식만 플랫폼별로
+     * 다르고, 파일 하나를 처리하는 로직은 restore_json_file 로 공유한다. */
+#ifdef _WIN32
+    char pattern[576];
+    snprintf(pattern, sizeof pattern, "%s\\*.json", dir);
+
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        restored += restore_json_file(srv, dir, fd.cFileName);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
     DIR *d = opendir(dir);
     if (!d) return 0;
 
-    int restored = 0;
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
         const char *nm = ent->d_name;
         size_t nlen = strlen(nm);
         if (nlen < 6 || strcmp(nm + nlen - 5, ".json") != 0) continue;
-
-        char fpath[1024];
-        snprintf(fpath, sizeof fpath, "%s/%s", dir, nm);
-
-        session_snapshot_t snap;
-        memset(&snap, 0, sizeof snap);
-        if (session_snapshot_load(fpath, &snap) != 0) continue;
-
-        if (restore_one_snapshot(srv, &snap) == 0) {
-            restored++;
-            fprintf(stderr, "[tessera-daemon] restored session '%s' (%d windows)\n",
-                    snap.name, snap.window_count);
-        }
+        restored += restore_json_file(srv, dir, nm);
     }
     closedir(d);
+#endif
 
     /* 세션이 복원되었으면 ever_had_client 를 올려 "빈 데몬 자동 종료" 를 유예.
      * 클라이언트 한 번도 안 붙어도 auto-shutdown 되지 않도록. */
@@ -1532,7 +1579,7 @@ int ipc_server_run(ipc_server_t *srv) {
                             if (slot && slot->pty_fd >= 0) {
                                 loop_del(srv, slot->pty_fd);
                                 pty_t pt = { .master_fd = slot->pty_fd,
-                                             .child_pid = (pid_t)p->pid };
+                                             .child_pid = p->pid };
                                 pty_close(&pt, NULL);
                                 slot->pty_fd = -1;
                             }
@@ -1583,7 +1630,7 @@ void ipc_server_destroy(ipc_server_t *srv) {
     /* 클라이언트 fd 정리 */
     for (int i = 0; i < IPC_MAX_CLIENTS; i++) {
         if (srv->clients[i].fd >= 0) {
-            close(srv->clients[i].fd);
+            ipc_close_conn(srv->clients[i].fd);
             srv->clients[i].fd = -1;
         }
     }
