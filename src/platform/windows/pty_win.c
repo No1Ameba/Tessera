@@ -182,10 +182,23 @@ ssize_t pty_read(pty_t *pty, void *buf, size_t len) {
     HANDLE h = (HANDLE)pty->hout;
 
     DWORD avail = 0;
-    /* 논블로킹: 데이터가 없으면 0, 파이프가 닫혔으면(자식 종료) -1(EOF). */
+    /* 논블로킹: 데이터가 없으면 0, 파이프가 닫혔으면 -1(EOF). */
     if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL))
         return -1;
-    if (avail == 0) return 0;
+    if (avail == 0) {
+        /*
+         * 남은 데이터가 없다. 자식이 이미 끝났다면 여기서 EOF 를 알려야 한다.
+         *
+         * POSIX 는 셸이 죽으면 PTY 마스터 read 가 EIO 를 내지만, ConPTY 는 자식이
+         * 종료해도 출력 파이프를 닫지 않는다 — conhost 가 의사 콘솔 수명 동안
+         * 살아 있기 때문이다. 그래서 파이프만 봐서는 셸 종료를 영원히 모르고,
+         * 데몬이 죽은 pane 을 정리하지 못한다. 자식 핸들을 같이 확인한다.
+         */
+        if (pty->hproc &&
+            WaitForSingleObject((HANDLE)pty->hproc, 0) == WAIT_OBJECT_0)
+            return -1;
+        return 0;
+    }
     DWORD toread = (avail < (DWORD)len) ? avail : (DWORD)len;
 
     /* hout 은 FILE_FLAG_OVERLAPPED 로 열려 있으므로 OVERLAPPED 없이 ReadFile 을

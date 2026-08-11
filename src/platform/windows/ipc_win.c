@@ -159,6 +159,49 @@ static void drop_conn_event(int fd) {
     }
 }
 
+/*
+ * 파이프에 지금 당장 쓸 수 있는 바이트 수.
+ *
+ * POSIX 의 논블로킹 write 는 "들어가는 만큼 쓰고 그 수를 돌려준다". Windows 에는
+ * 대응하는 공개 API 가 없어서, 커널이 들고 있는 파이프 정보에서 남은 쓰기 할당량
+ * (WriteQuotaAvailable)을 직접 읽는다. 이 값만큼만 쓰면 WriteFile 이 대기 없이
+ * 끝나므로 POSIX 와 같은 의미가 된다.
+ *
+ * ntdll 의 NtQueryInformationFile 은 헤더에 선언이 없어 런타임에 주소를 얻는다.
+ * 조회에 실패하면 -1 을 돌려주고, 호출자는 기존 방식(타임아웃 대기)으로 물러난다.
+ */
+typedef struct {
+    ULONG NamedPipeType, NamedPipeConfiguration, MaximumInstances;
+    ULONG CurrentInstances, InboundQuota, ReadDataAvailable;
+    ULONG OutboundQuota, WriteQuotaAvailable, NamedPipeState, NamedPipeEnd;
+} tessera_pipe_local_info_t;
+
+#define TESSERA_FilePipeLocalInformation 24
+
+static LONG pipe_write_space(HANDLE h)
+{
+    typedef LONG (WINAPI *nt_query_fn)(HANDLE, PVOID, PVOID, ULONG, ULONG);
+    static nt_query_fn query;
+    static int resolved;
+
+    if (!resolved) {
+        resolved = 1;
+        HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+        if (nt) query = (nt_query_fn)(void (*)(void))
+                            GetProcAddress(nt, "NtQueryInformationFile");
+    }
+    if (!query) return -1;
+
+    /* IO_STATUS_BLOCK 은 포인터 2개 크기면 충분하다(선언을 끌어오지 않는다). */
+    ULONG_PTR iosb[2] = {0};
+    tessera_pipe_local_info_t info;
+    memset(&info, 0, sizeof info);
+    if (query(h, iosb, &info, (ULONG)sizeof info,
+              TESSERA_FilePipeLocalInformation) < 0)
+        return -1;
+    return (LONG)info.WriteQuotaAvailable;
+}
+
 /* overlapped I/O 를 걸고 완료를 기다린다. 반환: 전송 바이트, -1 오류. */
 static ssize_t overlapped_io(int fd, void *buf, size_t len, int is_write,
                              int timeout_ms)
@@ -227,23 +270,40 @@ ssize_t ipc_read(int fd, void *buf, size_t len) {
 }
 
 ssize_t ipc_write(int fd, const void *buf, size_t len) {
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    if (h == INVALID_HANDLE_VALUE) { errno = EBADF; return -1; }
+
     /*
-     * 파이프 버퍼가 가득 차면 상대가 읽어갈 때까지 최대 500ms 기다린다
-     * (POSIX 쪽 write_all_retry 의 poll 타임아웃과 같은 값).
+     * 논블로킹 시맨틱: 파이프에 들어갈 만큼만 쓰고 그 수를 돌려준다.
+     * 이렇게 해야 ipc.h 계약(및 POSIX write)과 의미가 같아지고, 호출자의
+     * "부분 쓰기 → 재시도" 루프가 그대로 성립한다.
      *
-     * 무한 대기로 두면 안 된다 — 데몬은 단일 스레드라, 클라이언트 파이프가 찬
-     * 상태에서 PTY 출력을 쓰다 멈추면 그 클라이언트의 요청을 읽어 줄 주체가
-     * 사라져 교착한다(클라이언트는 응답을 기다리느라 버퍼를 비우지 않는다).
-     * 취소 시 GetOverlappedResult 가 보고하는 전송 바이트 수로 호출자가 이어서
-     * 보내므로 부분 쓰기 자체는 안전하다.
+     * 이 조회 없이 통째로 쓰려 하면 파이프가 찼을 때 완료를 기다리게 되는데,
+     * 데몬은 단일 스레드라 그 사이 클라이언트 요청을 못 읽어 교착한다
+     * (클라이언트는 응답을 기다리느라 버퍼를 비우지 않는다).
      */
+    LONG space = pipe_write_space(h);
+    if (space == 0) { errno = EAGAIN; return -1; }
+    if (space > 0 && (size_t)space < len) len = (size_t)space;
+
+    /* 할당량 안으로 줄였으므로 대기 없이 끝난다. 조회가 실패했을 때(space<0)를
+     * 대비해 타임아웃은 안전망으로 남겨 둔다. */
     return overlapped_io(fd, (void *)buf, len, /*is_write=*/1, 500);
 }
 
 int ipc_wait_writable(int fd, int timeout_ms) {
-    (void)fd; (void)timeout_ms;
-    /* 실제 대기는 ipc_write 내부의 overlapped 완료 대기에서 이뤄진다. */
-    return 1;
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    if (h == INVALID_HANDLE_VALUE) { errno = EBADF; return -1; }
+
+    /* POSIX 의 poll(POLLOUT) 대응. 파이프는 쓰기 가능으로 신호되지 않으므로
+     * 남은 할당량이 생길 때까지 짧게 폴링한다. 조회가 불가하면(space<0)
+     * 예전처럼 즉시 쓰기 가능으로 본다. */
+    for (int waited = 0; timeout_ms < 0 || waited < timeout_ms; waited++) {
+        LONG space = pipe_write_space(h);
+        if (space != 0) return 1;   /* >0 여유 있음, <0 조회 불가 → 시도 */
+        Sleep(1);
+    }
+    return 0;
 }
 
 int ipc_wait_readable(int fd, int timeout_ms) {
