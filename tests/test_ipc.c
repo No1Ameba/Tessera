@@ -652,7 +652,12 @@ static void test_empty_window_removed(void) {
     in.data_len = 5;
     uint8_t msg[sizeof(in) + 5];
     memcpy(msg, &in, sizeof(in));
+    /* ConPTY 는 콘솔 입력 버퍼라 Enter 가 CR 이다(LF 로는 줄이 제출되지 않는다). */
+#ifdef _WIN32
+    memcpy(msg + sizeof(in), "exit\r", 5);
+#else
     memcpy(msg + sizeof(in), "exit\n", 5);
+#endif
     client_send(cfd, IPC_MSG_PTY_INPUT, msg, (uint16_t)sizeof(msg));
 
     /* EOF 처리를 기다린다 */
