@@ -2074,7 +2074,13 @@ int main(int argc, char *argv[])
         glfwTerminate();
         return 1;
     }
+    /* 렌더러/벤더까지 남긴다 — 소프트웨어 래스터라이저(llvmpipe 등)로 떨어지면
+     * 체감 성능이 완전히 달라지는데, 버전 문자열만으로는 구분되지 않는다. */
+    const char *gl_vendor   = (const char *)glGetString(GL_VENDOR);
+    const char *gl_renderer = (const char *)glGetString(GL_RENDERER);
     fprintf(stderr, "[tessera] OpenGL %s\n", gl_version);
+    fprintf(stderr, "[tessera] renderer: %s / %s\n",
+            gl_renderer ? gl_renderer : "?", gl_vendor ? gl_vendor : "?");
     glfwSwapInterval(1);  /* VSync */
 
     /* Opacity — transparent framebuffer 방식 (Wayland 호환) */

@@ -302,38 +302,83 @@ int ipc_wait_writable(int fd, int timeout_ms) {
     HANDLE h = (HANDLE)_get_osfhandle(fd);
     if (h == INVALID_HANDLE_VALUE) { errno = EBADF; return -1; }
 
-    /* POSIX 의 poll(POLLOUT) 대응. 파이프는 쓰기 가능으로 신호되지 않으므로
-     * 남은 할당량이 생길 때까지 짧게 폴링한다. 조회가 불가하면(space<0)
-     * 예전처럼 즉시 쓰기 가능으로 본다. */
-    for (int waited = 0; timeout_ms < 0 || waited < timeout_ms; waited++) {
+    /* POSIX 의 poll(POLLOUT) 대응. 파이프에는 "쓰기 가능" 알림이 없어 남은
+     * 할당량이 생길 때까지 폴링할 수밖에 없다(읽기와 달리 0바이트 overlapped
+     * write 로는 기다릴 수 없다).
+     *
+     * 다만 반복 횟수로 시간을 세면 안 된다 — 기본 타이머 해상도에서 Sleep(1) 은
+     * 15ms 가 넘으므로 500ms 타임아웃이 실제로는 7초가 된다. 실제 시계로 잰다.
+     * 파이프가 완전히 찼을 때만 도달하는 경로라 폴링 주기는 성능에 영향이 없다.
+     * 조회가 불가하면(space<0) 예전처럼 즉시 쓰기 가능으로 본다. */
+    ULONGLONG deadline = GetTickCount64() + (timeout_ms < 0 ? 0 : (ULONGLONG)timeout_ms);
+    for (;;) {
         LONG space = pipe_write_space(h);
         if (space != 0) return 1;   /* >0 여유 있음, <0 조회 불가 → 시도 */
+        if (timeout_ms >= 0 && GetTickCount64() >= deadline) return 0;
         Sleep(1);
     }
-    return 0;
 }
 
 int ipc_wait_readable(int fd, int timeout_ms) {
     HANDLE h = (HANDLE)_get_osfhandle(fd);
     if (h == INVALID_HANDLE_VALUE) { errno = EBADF; return -1; }
 
-    /* 파이프는 데이터 도착으로 신호되지 않으므로 WaitForSingleObject 를 쓸 수 없다.
-     * 데몬(event_loop_win.c)은 IOCP 를 쓰지만, 클라이언트는 IOCP 를 두지 않는
-     * 단순한 요청/응답 경로라 짧은 주기 폴링으로 충분하다.
-     * TODO: 클라이언트도 IOCP 로 옮기면 이 폴링을 없앨 수 있다. */
-    for (int waited = 0; timeout_ms < 0 || waited < timeout_ms; waited++) {
-        DWORD avail = 0;
-        if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL)) {
-            DWORD err = GetLastError();
-            if (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED)
-                return 1;      /* EOF 도 "읽을 수 있음" — 호출자가 0 을 받는다 */
-            errno = EIO;
-            return -1;
-        }
-        if (avail > 0) return 1;
-        Sleep(1);
+    /* 이미 와 있으면 대기할 필요가 없다. */
+    DWORD avail = 0;
+    if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL)) {
+        DWORD perr = GetLastError();
+        if (perr == ERROR_BROKEN_PIPE || perr == ERROR_PIPE_NOT_CONNECTED)
+            return 1;          /* EOF 도 "읽을 수 있음" — 호출자가 0 을 받는다 */
+        errno = EIO;
+        return -1;
     }
-    return 0;
+    if (avail > 0) return 1;
+    if (timeout_ms == 0) return 0;
+
+    /*
+     * 0바이트 overlapped read 로 기다린다 — 데이터가 도착하는 순간 완료되지만
+     * 바이트는 소비하지 않는다(event_loop_win.c 와 같은 기법).
+     *
+     * 폴링(PeekNamedPipe + Sleep)으로 하면 안 된다. Windows 의 기본 타이머
+     * 해상도에서 Sleep(1) 은 실제로 15ms 가 넘게 걸린다. 클라이언트는 매 프레임
+     * ipc_client_poll(8ms) 을 부르므로, 1ms 씩 8번 자는 구현은 프레임당 100ms 를
+     * 넘겨 체감 프레임률을 10fps 아래로 떨어뜨렸다.
+     */
+    HANDLE ev = conn_event(fd);
+    if (!ev) { errno = ENOMEM; return -1; }
+
+    OVERLAPPED ov;
+    memset(&ov, 0, sizeof ov);
+    ResetEvent(ev);
+    ov.hEvent = (HANDLE)((ULONG_PTR)ev | 1);   /* 완료 패킷을 IOCP 로 보내지 않는다 */
+
+    char zero;
+    if (!ReadFile(h, &zero, 0, NULL, &ov)) {
+        DWORD err = GetLastError();
+        if (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED)
+            return 1;
+        if (err != ERROR_IO_PENDING) { errno = EIO; return -1; }
+    }
+
+    DWORD w = WaitForSingleObject(ev, timeout_ms < 0 ? INFINITE : (DWORD)timeout_ms);
+    if (w != WAIT_OBJECT_0) {
+        /* 시간 초과 — 0바이트 읽기라 취소해도 잃을 데이터가 없다. */
+        CancelIoEx(h, &ov);
+        DWORD done = 0;
+        GetOverlappedResult(h, &ov, &done, TRUE);
+        return 0;
+    }
+
+    DWORD done = 0;
+    if (!GetOverlappedResult(h, &ov, &done, FALSE)) {
+        DWORD err = GetLastError();
+        if (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED ||
+            err == ERROR_HANDLE_EOF)
+            return 1;
+        errno = EIO;
+        return -1;
+    }
+    return 1;
 }
 
 void ipc_close_conn(int fd) {
