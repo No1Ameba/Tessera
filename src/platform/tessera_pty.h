@@ -98,4 +98,17 @@ void pty_close(pty_t *pty, int *exit_status);
  */
 int pty_set_nonblocking(int fd);
 
+/*
+ * 자식 셸이 아직 살아 있는가?
+ *
+ * 읽기 EOF 만으로는 셸 종료를 알 수 없는 경우가 있어 별도로 확인해야 한다.
+ * POSIX 는 셸이 죽으면 마스터 read 가 EIO 를 내지만, Windows 의 ConPTY 는
+ * 자식이 종료해도 출력 파이프를 닫지 않는다(conhost 가 의사 콘솔 수명 동안
+ * 살아 있다). 그래서 "더 이상 읽을 것이 없다" 와 "셸이 죽었다" 가 구분되지 않고,
+ * 이벤트 루프도 더는 깨우지 않으므로 주기적으로 이 함수로 확인해야 한다.
+ *
+ * @return 1 살아 있음, 0 종료됨(또는 알 수 없음).
+ */
+int pty_child_alive(const pty_t *pty);
+
 #endif /* TESSERA_PTY_H */

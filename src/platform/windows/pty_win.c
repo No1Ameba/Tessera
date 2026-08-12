@@ -233,6 +233,11 @@ ssize_t pty_write(pty_t *pty, const void *buf, size_t len) {
     return (ssize_t)wrote;
 }
 
+int pty_child_alive(const pty_t *pty) {
+    if (!pty || !pty->hproc) return 0;
+    return WaitForSingleObject((HANDLE)pty->hproc, 0) != WAIT_OBJECT_0;
+}
+
 int pty_resize(pty_t *pty, uint16_t cols, uint16_t rows) {
     if (!pty || !pty->hpcon) { errno = EBADF; return -1; }
     COORD size = { (SHORT)cols, (SHORT)rows };

@@ -101,6 +101,13 @@ ssize_t pty_write(pty_t *pty, const void *buf, size_t len) {
     return write(pty->master_fd, buf, len);
 }
 
+int pty_child_alive(const pty_t *pty) {
+    if (!pty || pty->child_pid <= 0) return 0;
+    /* 데몬은 SIGCHLD 를 SIG_IGN + SA_NOCLDWAIT 로 두어 자식을 자동 수거하므로
+     * 좀비가 남지 않는다 → 죽은 pid 는 kill(0) 이 ESRCH 를 낸다. */
+    return kill(pty->child_pid, 0) == 0 || errno == EPERM;
+}
+
 int pty_resize(pty_t *pty, uint16_t cols, uint16_t rows) {
     if (!pty || pty->master_fd < 0) { errno = EBADF; return -1; }
     struct winsize ws;

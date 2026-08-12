@@ -103,6 +103,9 @@ struct ipc_server {
 
 static int write_all_retry(int fd, const void *buf, size_t len);
 static void read_pane_cwd(int pid, char *out, size_t out_size);
+static void pty_output_read(ipc_server_t *srv, int pty_fd);
+static void pane_handle_exit(ipc_server_t *srv, ipc_pane_slot_t *slot);
+static void reap_exited_panes(ipc_server_t *srv);
 
 static int64_t mono_ms(void) {
     return tessera_mono_ms();
@@ -1213,37 +1216,61 @@ static void pty_output_read(ipc_server_t *srv, int pty_fd) {
     }
 
     /* PTY EOF — 셸이 종료됨: 클라이언트에 알리고 pane 정리 */
-    if (pty_eof) {
-        ipc_payload_pane_ref_t ref = { .session_id = slot->session_id,
-                                        .window_id  = slot->window_id,
-                                        .pane_id    = slot->pane_id };
-        ipc_msg_header_t notify = IPC_HEADER_INIT(IPC_MSG_PANE_EXITED,
-                                                    sizeof(ref));
-        for (int i = 0; i < IPC_MAX_CLIENTS; i++) {
-            int cfd = srv->clients[i].fd;
-            if (cfd < 0) continue;
-            write_all_retry(cfd, &notify, sizeof(notify));
-            write_all_retry(cfd, &ref,    sizeof(ref));
-        }
+    if (pty_eof) pane_handle_exit(srv, slot);
+}
 
-        /* epoll 제거 + pty 닫기 */
-        loop_del(srv, slot->pty_fd);
-        pty_close(&slot->pty, NULL);
-        slot->pty_fd = -1;
+/*
+ * 셸이 끝난 pane 을 정리하고 클라이언트에 알린다.
+ * 호출 경로가 둘이다: PTY 읽기에서 EOF 를 본 경우, 그리고 아래 주기 점검.
+ */
+static void pane_handle_exit(ipc_server_t *srv, ipc_pane_slot_t *slot) {
+    ipc_payload_pane_ref_t ref = { .session_id = slot->session_id,
+                                    .window_id  = slot->window_id,
+                                    .pane_id    = slot->pane_id };
+    ipc_msg_header_t notify = IPC_HEADER_INIT(IPC_MSG_PANE_EXITED, sizeof(ref));
+    for (int i = 0; i < IPC_MAX_CLIENTS; i++) {
+        int cfd = srv->clients[i].fd;
+        if (cfd < 0) continue;
+        write_all_retry(cfd, &notify, sizeof(notify));
+        write_all_retry(cfd, &ref,    sizeof(ref));
+    }
 
-        /* session 트리에서 pane 제거 */
-        session_t *s = session_find_by_id(srv->session_mgr, slot->session_id);
-        window_t  *w = s ? window_find_by_id(s, slot->window_id) : NULL;
-        pane_t    *p = w ? pane_find_by_id(w, slot->pane_id)    : NULL;
-        if (p) pane_destroy(w, p);
+    /* 이벤트 루프에서 제거 + pty 닫기 */
+    loop_del(srv, slot->pty_fd);
+    pty_close(&slot->pty, NULL);
+    slot->pty_fd = -1;
 
-        /* window 의 마지막 pane 이었으면 빈 window 도 제거한다.
-         * 남겨두면 window_count 와 스냅샷에 빈 window 가 쌓인다. */
-        if (w && w->pane_count == 0 && s && s->window_count > 0)
-            window_destroy(s, w);
+    /* session 트리에서 pane 제거 */
+    session_t *s = session_find_by_id(srv->session_mgr, slot->session_id);
+    window_t  *w = s ? window_find_by_id(s, slot->window_id) : NULL;
+    pane_t    *p = w ? pane_find_by_id(w, slot->pane_id)    : NULL;
+    if (p) pane_destroy(w, p);
 
-        /* 세션의 마지막 pane 이었으면 세션 자체도 제거 (useless empty session 방지) */
-        if (s) session_destroy_if_empty(srv, s);
+    /* window 의 마지막 pane 이었으면 빈 window 도 제거한다.
+     * 남겨두면 window_count 와 스냅샷에 빈 window 가 쌓인다. */
+    if (w && w->pane_count == 0 && s && s->window_count > 0)
+        window_destroy(s, w);
+
+    /* 세션의 마지막 pane 이었으면 세션 자체도 제거 (useless empty session 방지) */
+    if (s) session_destroy_if_empty(srv, s);
+}
+
+/*
+ * 죽은 자식을 가진 pane 을 거둔다 — 이벤트 루프 한 바퀴마다 호출한다.
+ *
+ * 읽기 EOF 만으로는 부족하다. ConPTY 는 자식이 종료해도 출력 파이프를 닫지 않아
+ * (conhost 가 의사 콘솔 수명 동안 살아 있다) 더 이상 읽기 이벤트가 오지 않는다.
+ * 그러면 pty_read 가 다시 불리지 않으니 EOF 판정 자체가 실행되지 않고, 셸을
+ * 종료해도 pane 이 영영 남는다. 남은 출력을 먼저 비운 뒤 정리한다.
+ */
+static void reap_exited_panes(ipc_server_t *srv) {
+    for (int i = 0; i < IPC_MAX_PANES; i++) {
+        ipc_pane_slot_t *slot = &srv->panes[i];
+        if (slot->pty_fd < 0) continue;
+        if (pty_child_alive(&slot->pty)) continue;
+        pty_output_read(srv, slot->pty_fd);   /* 잔여 출력 flush → EOF 처리 */
+        if (slot->pty_fd >= 0)                /* 아직 남아 있으면 여기서 정리 */
+            pane_handle_exit(srv, slot);
     }
 }
 
@@ -1599,6 +1626,10 @@ int ipc_server_run(ipc_server_t *srv) {
                 s = next;
             }
         }
+
+        /* 셸이 끝났는데 읽기 이벤트로는 알 수 없는 pane 을 거둔다.
+         * (ConPTY 는 자식이 죽어도 출력 파이프를 닫지 않는다 — reap_exited_panes 참고) */
+        reap_exited_panes(srv);
 
         /* 모든 세션 소멸 시 자동 종료 — 단, 한 번이라도 클라이언트가 연결된 후에만 */
         if (srv->ever_had_client && srv->session_mgr->count == 0) {

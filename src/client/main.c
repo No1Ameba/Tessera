@@ -1362,6 +1362,19 @@ static void key_callback(GLFWwindow *win, int key, int scancode,
 
     if (action == GLFW_RELEASE) return;
 
+    /* TESSERA_DEBUG_KEYS=1 이면 키 이벤트를 stderr 로 흘린다.
+     * 단축키가 안 먹을 때 GLFW 가 실제로 무엇을 보고하는지(특히 mods)와,
+     * 오버레이가 키를 가로채고 있는지를 구분하는 용도. */
+    {
+        static int dbg = -1;
+        if (dbg < 0) { const char *e = getenv("TESSERA_DEBUG_KEYS"); dbg = (e && *e && *e != '0'); }
+        if (dbg)
+            fprintf(stderr, "[keys] key=%d scancode=%d mods=0x%x -> mod_flags=0x%x "
+                            "picker=%d settings=%d ctx=%d\n",
+                    key, scancode, mods, input_glfw_mods(mods),
+                    g_show_session_picker, g_show_settings, g_show_context_menu);
+    }
+
     /* ESC → 설정창/컨텍스트 메뉴 닫기 */
     if (key == GLFW_KEY_ESCAPE) {
         if (g_show_context_menu) { g_show_context_menu = 0; g_key_consumed = 1; g_dirty = 1; return; }
