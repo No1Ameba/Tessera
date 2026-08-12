@@ -1389,13 +1389,18 @@ static void key_callback(GLFWwindow *win, int key, int scancode,
     (void)win;
     g_key_consumed = 0;
 
-    if (action == GLFW_RELEASE) return;
-
+    /* RELEASE 도 찍는다 — 눌림만 보면 "키가 아예 안 온다" 와 "눌림은 오는데
+     * 걸러진다" 를 구분할 수 없다. 이 로그는 어떤 조기 반환보다도 앞에 있어야 한다. */
     if (dbg_keys())
-        fprintf(stderr, "[keys] key=%d scancode=%d action=%d mods=0x%x -> mod_flags=0x%x "
+        fprintf(stderr, "[keys] key=%d scancode=%d action=%s mods=0x%x -> mod_flags=0x%x "
                         "picker=%d settings=%d ctx=%d\n",
-                key, scancode, action, mods, input_glfw_mods(mods),
+                key, scancode,
+                action == GLFW_PRESS ? "PRESS" :
+                action == GLFW_RELEASE ? "RELEASE" : "REPEAT",
+                mods, input_glfw_mods(mods),
                 g_show_session_picker, g_show_settings, g_show_context_menu);
+
+    if (action == GLFW_RELEASE) return;
 
     /* ESC → 설정창/컨텍스트 메뉴 닫기 */
     if (key == GLFW_KEY_ESCAPE) {
@@ -1538,6 +1543,10 @@ static void key_callback(GLFWwindow *win, int key, int scancode,
 
 static void char_callback(GLFWwindow *win, unsigned int codepoint)
 {
+    if (dbg_keys())
+        fprintf(stderr, "[keys] char U+%04X '%c'\n", codepoint,
+                (codepoint >= 32 && codepoint < 127) ? (char)codepoint : '?');
+
     (void)win;
 
     /* Nuklear 오버레이 활성 시 우선 전달 (g_key_consumed 무시) */
@@ -2450,15 +2459,33 @@ int main(int argc, char *argv[])
 
                     /* ── 세션 선택 다이얼로그 ── */
                     if (g_show_session_picker) {
-                        float dw = 420, dh = 350;
+                        /* 높이는 내용에 맞춰 잡는다. 고정 350 이었을 때는 세션이
+                         * 다섯 개만 돼도 Create New/Cancel 이 다이얼로그 밖으로
+                         * 밀려나 눌 수가 없었다. 화면보다 커지면 잘라내되,
+                         * 스크롤바를 남겨 항상 닿을 수 있게 한다. */
+                        const float gap = g_nk_ctx->style.window.spacing.y;
+                        float need = 0.0f;
+                        if (remote_target) need += 20.0f + gap;   /* 원격 정보 */
+                        need += 25.0f + gap;                      /* 세션 목록 라벨 */
+                        need += (float)g_picker_count * (28.0f + gap);
+                        need += 20.0f + gap;                      /* 여백 */
+                        need += 25.0f + gap;                      /* 이름 라벨 */
+                        need += 30.0f + gap;                      /* 입력칸 */
+                        need += 35.0f + gap;                      /* 버튼 행 */
+                        need += g_nk_ctx->style.window.padding.y * 2.0f
+                              + 45.0f;                            /* 타이틀바 여유 */
+
+                        float dw = 420;
+                        float max_h = (float)g_win_h * 0.9f;
+                        float dh = need < max_h ? need : max_h;
                         float dx = ((float)g_win_w - dw) * 0.5f;
                         float dy = ((float)g_win_h - dh) * 0.5f;
+                        if (dy < 0) dy = 0;
                         const char *title = remote_target
                             ? "Select Session (Remote)" : "Select Session";
                         if (nk_begin(g_nk_ctx, title,
                                      nk_rect(dx, dy, dw, dh),
-                                     NK_WINDOW_BORDER | NK_WINDOW_TITLE |
-                                     NK_WINDOW_NO_SCROLLBAR))
+                                     NK_WINDOW_BORDER | NK_WINDOW_TITLE))
                         {
                             if (remote_target) {
                                 nk_layout_row_dynamic(g_nk_ctx, 20, 1);
