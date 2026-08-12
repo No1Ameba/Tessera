@@ -2094,6 +2094,17 @@ int main(int argc, char *argv[])
     fprintf(stderr, "[tessera] OpenGL %s\n", gl_version);
     fprintf(stderr, "[tessera] renderer: %s / %s\n",
             gl_renderer ? gl_renderer : "?", gl_vendor ? gl_vendor : "?");
+    /* 모니터 배율도 남긴다. 현재 UI 는 이 값을 반영하지 않아, 고DPI 화면에서
+     * 터미널과 오버레이가 의도한 크기의 1/scale 로 그려진다(선이 헤어라인이 된다). */
+    {
+        float sx = 1.0f, sy = 1.0f;
+        int fbw = 0, fbh = 0;
+        glfwGetWindowContentScale(g_window, &sx, &sy);
+        glfwGetFramebufferSize(g_window, &fbw, &fbh);
+        fprintf(stderr, "[tessera] framebuffer %dx%d, monitor scale %.2fx%.2f%s\n",
+                fbw, fbh, sx, sy,
+                (sx > 1.01f || sy > 1.01f) ? " (미반영 — UI 가 작게 보임)" : "");
+    }
     glfwSwapInterval(1);  /* VSync */
 
     /* Opacity — transparent framebuffer 방식 (Wayland 호환) */
