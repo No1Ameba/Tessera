@@ -63,14 +63,20 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
   # ---------------------------------------------------------------------------
-  # Windows — MSVC compile-check of the platform leaf backends.
+  # Windows — MSVC full build + tests.
   #
-  # A full Windows build is not yet possible: the daemon (ipc_server.c) is bound
-  # to epoll and needs an IOCP port first. This job therefore only compiles the
-  # three Windows platform sources (ConPTY / Named Pipe / ReadDirectoryChangesW)
-  # with cl /c to verify they build against the Windows SDK and that
-  # tessera_pty.h is Windows-valid. Their #includes are all source-relative, so
-  # no cJSON / FreeType / vcpkg are needed here.
+  # 데몬이 IOCP 로 포팅되면서(event_loop_win.c) 전체 빌드가 가능해졌다. 예전에는
+  # 플랫폼 leaf 3종만 `cl /c` 로 컴파일 체크했지만, 그 범위로는 데몬·클라이언트가
+  # 깨져도 CI 가 통과한다 — 실제로 Windows 백엔드가 "미검증" 상태로 오래 방치됐고
+  # 열어보니 빌드조차 되지 않았다. 이제 다른 플랫폼과 동일하게 빌드 + ctest 를
+  # 돌린다.
+  #
+  # TESSERA_BUILD_APPS=ON 인 이유: 이번에 포팅한 대상이 정확히 데몬/클라이언트/
+  # bridge 라, 앱을 빌드하지 않으면 회귀를 잡지 못한다. GLFW 는 FetchContent 로
+  # 받는다.
+  #
+  # 러너는 x64 다(개발은 ARM64 에서 이뤄졌다). 두 아키텍처를 모두 밟는 셈이라
+  # 포인터 크기·정렬 가정이 어긋나면 여기서 드러난다.
   # ---------------------------------------------------------------------------
   build-windows:
     runs-on: windows-latest
@@ -80,9 +86,32 @@ jobs:
       - name: Set up MSVC (cl on PATH)
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Compile-check Windows platform backends
-        shell: cmd
+      # vcpkg 는 러너에 미리 설치돼 있다($VCPKG_INSTALLATION_ROOT).
+      # 소스 빌드가 오래 걸리므로 바이너리 캐시를 재사용한다.
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/AppData/Local/vcpkg/archives
+          key: vcpkg-windows-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: vcpkg-windows-
+
+      - name: Install dependencies (vcpkg)
+        shell: pwsh
         run: |
-          cl /c /W3 /nologo src\platform\windows\pty_win.c /Fo:pty_win.obj || exit /b 1
-          cl /c /W3 /nologo src\platform\windows\ipc_win.c /Fo:ipc_win.obj || exit /b 1
-          cl /c /W3 /nologo src\platform\windows\fs_watch_win.c /Fo:fswatch_win.obj || exit /b 1
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install `
+            cjson harfbuzz freetype --triplet x64-windows
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug `
+            -DTESSERA_BUILD_APPS=ON `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      # test_pty / test_ipc 는 ConPTY 로 실제 cmd.exe 를 띄우고 데몬 루프를 돌린다.
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
