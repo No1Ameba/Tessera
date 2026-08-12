@@ -28,6 +28,13 @@
 #include <lmcons.h>   /* UNLEN */
 
 int ipc_socket_path(char *buf, size_t buflen) {
+    /* 명시적 오버라이드가 있으면 그대로 쓴다(ipc.h 참고). */
+    const char *override = getenv("TESSERA_IPC_PATH");
+    if (override && override[0]) {
+        int n = snprintf(buf, buflen, "%s", override);
+        return (n > 0 && (size_t)n < buflen) ? 0 : -1;
+    }
+
     /* Windows: 파이프 이름 \\.\pipe\tessera-<username> */
     char user[UNLEN + 1] = "user";
     DWORD n = (DWORD)sizeof user;

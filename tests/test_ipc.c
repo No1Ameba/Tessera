@@ -821,7 +821,34 @@ static void test_error_handling(void) {
 
 /* ─── main ───────────────────────────────────────────────────────────────── */
 
+/*
+ * 이 테스트는 진짜 데몬과 같은 엔드포인트를 쓰면 안 된다.
+ *
+ * Named Pipe 는 같은 이름의 인스턴스를 여러 개 허용하므로, 사용자의 데몬이 떠
+ * 있으면 CreateNamedPipe 가 그대로 성공하고 테스트 클라이언트가 **진짜 데몬에**
+ * 붙어 버린다(결과: 대량 실패 또는 크래시). POSIX 도 ipc_listen_socket 이 기존
+ * 소켓 파일을 unlink 하므로 실행 중인 데몬의 소켓을 빼앗는다.
+ * 프로세스별 고유 엔드포인트로 격리한다.
+ */
+static void isolate_ipc_endpoint(void) {
+    char path[IPC_SOCKET_PATH_MAX];
+#ifdef _WIN32
+    snprintf(path, sizeof path, "\\\\.\\pipe\\tessera_selftest_%lu",
+             (unsigned long)GetCurrentProcessId());
+    _putenv_s("TESSERA_IPC_PATH", path);
+#else
+    snprintf(path, sizeof path, "/tmp/tessera_selftest_%d.sock", (int)getpid());
+    setenv("TESSERA_IPC_PATH", path, 1);
+#endif
+}
+
 int main(void) {
+    /* 출력을 버퍼링하지 않는다 — 죽으면 버퍼가 통째로 유실되어 어디까지
+     * 진행했는지조차 알 수 없다. CI 로그에서도 진행 상황이 즉시 보인다. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+
+    isolate_ipc_endpoint();
+
     printf("=== IPC 서버 테스트 ===\n");
 
     test_socket_path();

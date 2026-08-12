@@ -19,6 +19,13 @@
 /* ─── 소켓 경로 ──────────────────────────────────────────────────────────── */
 
 int ipc_socket_path(char *buf, size_t buflen) {
+    /* 명시적 오버라이드가 있으면 그대로 쓴다(ipc.h 참고). */
+    const char *override = getenv("TESSERA_IPC_PATH");
+    if (override && override[0]) {
+        int n = snprintf(buf, buflen, "%s", override);
+        return (n > 0 && (size_t)n < buflen) ? 0 : -1;
+    }
+
     /* $XDG_RUNTIME_DIR (per-user, mode 0700, tmpfs) 는 런타임 소켓의 올바른
      * 위치다. world-writable 인 /tmp 는 소켓 파일에 대한 symlink/TOCTOU 경쟁에
      * 노출되므로 XDG_RUNTIME_DIR 를 우선한다. 변수가 없을 때만 /tmp 로 폴백한다

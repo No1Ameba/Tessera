@@ -113,7 +113,16 @@ sudo cmake --install build --prefix /usr/local
 ./tessera-daemon --help    # 도움말
 ```
 
-소켓 경로: `/tmp/tessera-<uid>.sock`
+기본 엔드포인트:
+
+| 플랫폼 | 경로 |
+|--------|------|
+| Linux/macOS | `$XDG_RUNTIME_DIR/tessera-<uid>.sock` (없으면 `/tmp/tessera-<uid>.sock`) |
+| Windows | `\\.\pipe\tessera-<username>` |
+
+`TESSERA_IPC_PATH` 로 덮어쓸 수 있습니다. 데몬과 클라이언트가 같은 값을 봐야 하므로
+둘 다 같은 환경에서 실행하세요. 기본 엔드포인트는 사용자당 하나이므로, 서로 간섭하지
+않는 인스턴스를 따로 띄우거나 실행 중인 데몬과 충돌 없이 테스트를 돌릴 때 씁니다.
 
 종료: `pkill tessera-daemon` (SIGTERM/SIGINT으로 정상 종료)
 
