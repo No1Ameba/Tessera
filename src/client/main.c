@@ -167,6 +167,19 @@ static char g_theme_path[512] = {0};
 static tessera_config_t *g_cfg_ptr = NULL;
 static tessera_theme_t  *g_theme_mut_ptr = NULL;
 
+/* TESSERA_DEBUG_KEYS=1 이면 키 처리 경로를 stderr 로 흘린다.
+ * 단축키가 안 먹을 때 GLFW 가 실제로 보고하는 값(특히 mods)과, 어느 단계에서
+ * 처리가 끊기는지를 구분하는 용도. */
+static int dbg_keys(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("TESSERA_DEBUG_KEYS");
+        on = (e && *e && *e != '0');
+    }
+    return on;
+}
+
 /* key_callback에서 처리 완료 시 char_callback 무시 */
 static int g_key_consumed = 0;
 
@@ -493,10 +506,20 @@ static void on_pane_split(uint32_t session_id, uint32_t window_id,
 
 static void do_split(layout_node_type_t dir)
 {
-    if (!g_layout || !g_client) return;
+    if (dbg_keys())
+        fprintf(stderr, "[keys] do_split(dir=%d) layout=%p client=%p active=%u\n",
+                (int)dir, (void*)g_layout, (void*)g_client, g_active_pane);
+
+    if (!g_layout || !g_client) {
+        if (dbg_keys()) fprintf(stderr, "[keys]   → 중단: layout/client 없음\n");
+        return;
+    }
 
     layout_node_t *cur_leaf = layout_find_pane(g_layout, g_active_pane);
-    if (!cur_leaf) return;
+    if (!cur_leaf) {
+        if (dbg_keys()) fprintf(stderr, "[keys]   → 중단: 활성 pane 을 레이아웃에서 못 찾음\n");
+        return;
+    }
 
     int fw = font_cell_width(g_font);
     int fh = font_cell_height(g_font);
@@ -517,11 +540,17 @@ static void do_split(layout_node_type_t dir)
     if (ipc_client_pane_create_split(g_client, g_session_id, g_window_id,
                                       (uint16_t)nc, (uint16_t)nr,
                                       g_active_pane, notify_dir, 0.5f,
-                                      &new_pane_id) != 0)
+                                      &new_pane_id) != 0) {
+        if (dbg_keys())
+            fprintf(stderr, "[keys]   → 중단: pane_create_split 실패 "
+                            "(session=%u window=%u cols=%d rows=%d)\n",
+                    g_session_id, g_window_id, nc, nr);
         return;
+    }
 
     layout_node_t *new_leaf = layout_split(cur_leaf, dir, 0.5f, new_pane_id);
     if (!new_leaf) {
+        if (dbg_keys()) fprintf(stderr, "[keys]   → 중단: layout_split 실패\n");
         ipc_client_pane_destroy(g_client, g_session_id, g_window_id, new_pane_id);
         return;
     }
@@ -1362,18 +1391,11 @@ static void key_callback(GLFWwindow *win, int key, int scancode,
 
     if (action == GLFW_RELEASE) return;
 
-    /* TESSERA_DEBUG_KEYS=1 이면 키 이벤트를 stderr 로 흘린다.
-     * 단축키가 안 먹을 때 GLFW 가 실제로 무엇을 보고하는지(특히 mods)와,
-     * 오버레이가 키를 가로채고 있는지를 구분하는 용도. */
-    {
-        static int dbg = -1;
-        if (dbg < 0) { const char *e = getenv("TESSERA_DEBUG_KEYS"); dbg = (e && *e && *e != '0'); }
-        if (dbg)
-            fprintf(stderr, "[keys] key=%d scancode=%d mods=0x%x -> mod_flags=0x%x "
-                            "picker=%d settings=%d ctx=%d\n",
-                    key, scancode, mods, input_glfw_mods(mods),
-                    g_show_session_picker, g_show_settings, g_show_context_menu);
-    }
+    if (dbg_keys())
+        fprintf(stderr, "[keys] key=%d scancode=%d action=%d mods=0x%x -> mod_flags=0x%x "
+                        "picker=%d settings=%d ctx=%d\n",
+                key, scancode, action, mods, input_glfw_mods(mods),
+                g_show_session_picker, g_show_settings, g_show_context_menu);
 
     /* ESC → 설정창/컨텍스트 메뉴 닫기 */
     if (key == GLFW_KEY_ESCAPE) {
