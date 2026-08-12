@@ -2459,10 +2459,14 @@ int main(int argc, char *argv[])
 
                     /* ── 세션 선택 다이얼로그 ── */
                     if (g_show_session_picker) {
-                        /* 높이는 내용에 맞춰 잡는다. 고정 350 이었을 때는 세션이
-                         * 다섯 개만 돼도 Create New/Cancel 이 다이얼로그 밖으로
-                         * 밀려나 눌 수가 없었다. 화면보다 커지면 잘라내되,
-                         * 스크롤바를 남겨 항상 닿을 수 있게 한다. */
+                        /* 설정창·확인 팝업과 같은 반응형 배치를 쓴다
+                         * (ui_overlay_centered_rect: 비율 + min/max 클램프).
+                         *
+                         * 고정 420x350 이었을 때는 세션이 다섯 개만 돼도 내용이
+                         * 넘쳐 Create New/Cancel 이 창 밖으로 밀려났다. 목록 길이가
+                         * 가변이므로 필요한 높이를 계산해 하한으로 넘긴다 —
+                         * 창이 작아 다 못 담으면 헬퍼가 화면 안으로 잘라 주고,
+                         * 스크롤바로 나머지에 닿는다. */
                         const float gap = g_nk_ctx->style.window.spacing.y;
                         float need = 0.0f;
                         if (remote_target) need += 20.0f + gap;   /* 원격 정보 */
@@ -2475,12 +2479,12 @@ int main(int argc, char *argv[])
                         need += g_nk_ctx->style.window.padding.y * 2.0f
                               + 45.0f;                            /* 타이틀바 여유 */
 
-                        float dw = 420;
-                        float max_h = (float)g_win_h * 0.9f;
-                        float dh = need < max_h ? need : max_h;
-                        float dx = ((float)g_win_w - dw) * 0.5f;
-                        float dy = ((float)g_win_h - dh) * 0.5f;
-                        if (dy < 0) dy = 0;
+                        float dx, dy, dw, dh;
+                        ui_overlay_centered_rect((float)g_win_w, (float)g_win_h,
+                                                  0.34f, 0.55f,
+                                                  360.0f, 560.0f,
+                                                  need,  760.0f,
+                                                  &dx, &dy, &dw, &dh);
                         const char *title = remote_target
                             ? "Select Session (Remote)" : "Select Session";
                         if (nk_begin(g_nk_ctx, title,
