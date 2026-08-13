@@ -1402,10 +1402,23 @@ static void key_callback(GLFWwindow *win, int key, int scancode,
 
     if (action == GLFW_RELEASE) return;
 
+    /* 단축키 캡처가 최우선이다 — 지금 누르는 조합이 곧 바인딩 값이므로 ESC 처리나
+     * Nuklear 위젯 조작으로 새어 나가면 안 된다. ESC 는 설정창을 닫는 대신
+     * 캡처만 취소한다(settings_ui_capture_key 안에서 처리). */
+    if (g_show_settings && settings_ui_is_capturing()) {
+        settings_ui_capture_key(key, input_glfw_mods(mods));
+        g_key_consumed = 1;
+        g_dirty = 1;
+        return;
+    }
+
     /* ESC → 설정창/컨텍스트 메뉴 닫기 */
     if (key == GLFW_KEY_ESCAPE) {
         if (g_show_context_menu) { g_show_context_menu = 0; g_key_consumed = 1; g_dirty = 1; return; }
-        if (g_show_settings) { g_show_settings = 0; g_key_consumed = 1; g_dirty = 1; return; }
+        if (g_show_settings) {
+            g_show_settings = 0; settings_ui_cancel_capture();
+            g_key_consumed = 1; g_dirty = 1; return;
+        }
     }
 
     /* 키 입력 시 선택 해제 */
@@ -2547,8 +2560,10 @@ int main(int argc, char *argv[])
                                                        (float)fbw_s, (float)fbh_s);
                         if (result == 1)
                             do_config_reload();
-                        else if (result == -1)
+                        else if (result == -1) {
                             g_show_settings = 0;
+                            settings_ui_cancel_capture();
+                        }
                     }
 
                     /* ── 닫기 확인 모달 ── */

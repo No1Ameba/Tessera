@@ -90,6 +90,81 @@ int input_glfw_key_from_name(const char *name)
     return -1;
 }
 
+/* GLFW_KEY → 이름. input_glfw_key_from_name 의 역방향이며 같은 표기를 쓴다.
+ * 표현할 수 없으면 NULL. */
+static const char *key_name_from_glfw(int key, char *scratch, size_t scratch_size)
+{
+    if (key >= GLFW_KEY_A && key <= GLFW_KEY_Z) {
+        snprintf(scratch, scratch_size, "%c", 'a' + (key - GLFW_KEY_A));
+        return scratch;
+    }
+    if (key >= GLFW_KEY_0 && key <= GLFW_KEY_9) {
+        snprintf(scratch, scratch_size, "%c", '0' + (key - GLFW_KEY_0));
+        return scratch;
+    }
+    switch (key) {
+    case GLFW_KEY_MINUS:         return "minus";
+    case GLFW_KEY_EQUAL:         return "equal";
+    case GLFW_KEY_COMMA:         return "comma";
+    case GLFW_KEY_PERIOD:        return "period";
+    case GLFW_KEY_SLASH:         return "slash";
+    case GLFW_KEY_BACKSLASH:     return "backslash";
+    case GLFW_KEY_SEMICOLON:     return "semicolon";
+    case GLFW_KEY_APOSTROPHE:    return "apostrophe";
+    case GLFW_KEY_GRAVE_ACCENT:  return "grave";
+    case GLFW_KEY_SPACE:         return "space";
+    case GLFW_KEY_BACKSPACE:     return "BackSpace";
+    case GLFW_KEY_TAB:           return "Tab";
+    case GLFW_KEY_ENTER:         return "Return";
+    case GLFW_KEY_ESCAPE:        return "Escape";
+    case GLFW_KEY_PAGE_UP:       return "Prior";
+    case GLFW_KEY_PAGE_DOWN:     return "Next";
+    case GLFW_KEY_HOME:          return "Home";
+    case GLFW_KEY_END:           return "End";
+    case GLFW_KEY_INSERT:        return "Insert";
+    case GLFW_KEY_DELETE:        return "Delete";
+    case GLFW_KEY_UP:            return "Up";
+    case GLFW_KEY_DOWN:          return "Down";
+    case GLFW_KEY_LEFT:          return "Left";
+    case GLFW_KEY_RIGHT:         return "Right";
+    default: break;
+    }
+    if (key >= GLFW_KEY_F1 && key <= GLFW_KEY_F12) {
+        snprintf(scratch, scratch_size, "F%d", 1 + (key - GLFW_KEY_F1));
+        return scratch;
+    }
+    return NULL;
+}
+
+int input_keybind_format(int glfw_key, unsigned int mods,
+                          char *out, size_t out_size)
+{
+    if (!out || out_size == 0) return -1;
+    out[0] = '\0';
+
+    /* 모디파이어 자체는 바인딩의 키가 될 수 없다. */
+    switch (glfw_key) {
+    case GLFW_KEY_LEFT_SHIFT:   case GLFW_KEY_RIGHT_SHIFT:
+    case GLFW_KEY_LEFT_CONTROL: case GLFW_KEY_RIGHT_CONTROL:
+    case GLFW_KEY_LEFT_ALT:     case GLFW_KEY_RIGHT_ALT:
+    case GLFW_KEY_LEFT_SUPER:   case GLFW_KEY_RIGHT_SUPER:
+        return -1;
+    default: break;
+    }
+
+    char scratch[8];
+    const char *name = key_name_from_glfw(glfw_key, scratch, sizeof scratch);
+    if (!name) return -1;
+
+    /* 파서가 '+' 로 토큰을 나누므로 순서는 자유지만 읽기 쉽게 고정한다. */
+    int n = snprintf(out, out_size, "%s%s%s%s",
+                     (mods & INPUT_MOD_CTRL)  ? "Ctrl+"  : "",
+                     (mods & INPUT_MOD_ALT)   ? "Alt+"   : "",
+                     (mods & INPUT_MOD_SHIFT) ? "Shift+" : "",
+                     name);
+    return (n > 0 && (size_t)n < out_size) ? 0 : -1;
+}
+
 int keybind_matches(const char *binding, unsigned int mods, int glfw_key)
 {
     if (!binding || !binding[0]) return 0;

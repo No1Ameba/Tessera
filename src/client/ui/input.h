@@ -57,6 +57,18 @@ int input_glfw_key_from_name(const char *name);
 int keybind_matches(const char *binding, unsigned int mods, int glfw_key);
 
 /*
+ * (키, 모디파이어) → 바인딩 문자열. keybind_matches 가 파싱하는 형식 그대로
+ * 만든다("Alt+equal", "Ctrl+Shift+w" 등). 설정 UI 에서 키를 직접 눌러 바인딩을
+ * 지정할 때 쓴다.
+ *
+ * 모디파이어 단독 키(Shift/Ctrl/Alt/Super)는 바인딩이 될 수 없으므로 거절한다.
+ *
+ * @return 0 성공, -1 표현할 수 없는 키이거나 버퍼 부족.
+ */
+int input_keybind_format(int glfw_key, unsigned int mods,
+                          char *out, size_t out_size);
+
+/*
  * Translate a mouse event to SGR escape sequence bytes.
  * col, row: 1-based terminal cell coordinates
  * button: 0=left, 1=middle, 2=right, 3=release (when press=0)

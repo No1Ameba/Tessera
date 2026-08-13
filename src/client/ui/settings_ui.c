@@ -1,6 +1,8 @@
 #include "settings_ui.h"
 #include "file_picker.h"
 #include "ui_overlay.h"
+#include "input.h"      /* input_keybind_format — 캡처한 키를 바인딩 문자열로 */
+#include <GLFW/glfw3.h> /* 캡처 취소(Escape) 판정 */
 
 #define NK_INCLUDE_FIXED_TYPES
 #define NK_INCLUDE_STANDARD_IO
@@ -36,15 +38,57 @@ static uint32_t nkcolorf_to_u32(struct nk_colorf cf)
 
 /* ── 키바인딩 편집 행 ────────────────────────────────────────────────────── */
 
+/* 캡처 대상. NULL 이면 캡처 중이 아니다. */
+static char *g_capture_buf;
+static int   g_capture_len;
+
+int settings_ui_is_capturing(void) { return g_capture_buf != NULL; }
+
+void settings_ui_cancel_capture(void) { g_capture_buf = NULL; g_capture_len = 0; }
+
+int settings_ui_capture_key(int glfw_key, unsigned int mod_flags)
+{
+    if (!g_capture_buf) return 1;
+
+    if (glfw_key == GLFW_KEY_ESCAPE) {   /* 취소 */
+        settings_ui_cancel_capture();
+        return 1;
+    }
+
+    char formatted[64];
+    if (input_keybind_format(glfw_key, mod_flags,
+                             formatted, sizeof formatted) != 0)
+        return 0;   /* 모디파이어 단독 등 — 계속 기다린다 */
+
+    snprintf(g_capture_buf, (size_t)g_capture_len, "%s", formatted);
+    settings_ui_cancel_capture();
+    return 1;
+}
+
 static void keybind_row(struct nk_context *ctx, const char *label,
                          char *buf, int buflen)
 {
-    nk_layout_row_begin(ctx, NK_DYNAMIC, 30, 2);
-    nk_layout_row_push(ctx, 0.45f);
+    int capturing = (g_capture_buf == buf);
+
+    nk_layout_row_begin(ctx, NK_DYNAMIC, 30, 3);
+    nk_layout_row_push(ctx, 0.40f);
     nk_label(ctx, label, NK_TEXT_LEFT);
-    nk_layout_row_push(ctx, 0.55f);
-    nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD, buf, buflen,
-                                   nk_filter_default);
+
+    nk_layout_row_push(ctx, 0.42f);
+    if (capturing) {
+        /* 캡처 중에는 편집칸 대신 안내를 띄운다 — 지금 누르는 키가 곧 값이다. */
+        nk_label_colored(ctx, "  키를 누르세요 (Esc 취소)", NK_TEXT_LEFT,
+                         nk_rgb(120, 200, 255));
+    } else {
+        nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD, buf, buflen,
+                                       nk_filter_default);
+    }
+
+    nk_layout_row_push(ctx, 0.18f);
+    if (nk_button_label(ctx, capturing ? "Cancel" : "Set")) {
+        if (capturing) settings_ui_cancel_capture();
+        else { g_capture_buf = buf; g_capture_len = buflen; }
+    }
     nk_layout_row_end(ctx);
 }
 
